@@ -49,13 +49,16 @@ pub fn main(init: std.process.Init) !void {
     var session = instructor.session(gpa, &client);
     defer session.deinit();
 
-    const plan = try session.create(SearchPlan, instructor.OpenAI.Request{
+    const plan = session.create(SearchPlan, instructor.OpenAI.Request{
         .model = "openai/gpt-oss-20b:free",
         .messages = &.{.{
             .role = .user,
             .content = "Create exactly four search actions: image search for a cat picture, video search for a dog video, web search for cat taxonomy, web search for dog taxonomy.",
         }},
-    }, .{});
+    }, .{}) catch |err| {
+        instructor.printError(err, &client);
+        return err;
+    };
 
     for (plan.searches) |search| {
         std.debug.print("search {s}: {s}\n", .{ @tagName(search.type), search.query });

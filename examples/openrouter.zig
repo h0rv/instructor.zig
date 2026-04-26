@@ -33,11 +33,14 @@ pub fn main(init: std.process.Init) !void {
     var session = instructor.session(gpa, &client);
     defer session.deinit();
 
-    const person = try session.create(Person, instructor.OpenAI.Request{
+    const person = session.create(Person, instructor.OpenAI.Request{
         // Replace with any OpenRouter free model slug when testing.
         .model = "openai/gpt-oss-20b:free",
         .messages = &.{.{ .role = .user, .content = "Robby is 24. Return only the structured person." }},
-    }, .{});
+    }, .{}) catch |err| {
+        instructor.printError(err, &client);
+        return err;
+    };
 
     std.debug.print("{s}: {}\n", .{ person.name, person.age });
 }

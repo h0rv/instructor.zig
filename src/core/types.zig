@@ -30,6 +30,34 @@ pub const RetryMessage = struct {
     error_message: []const u8,
 };
 
+pub const Diagnostic = struct {
+    provider: []const u8 = "unknown",
+    status: ?std.http.Status = null,
+    body: ?[]const u8 = null,
+
+    pub fn writeError(self: Diagnostic, writer: *std.Io.Writer, err: anyerror) !void {
+        try writer.print("error: {s}\n", .{@errorName(err)});
+        try writer.print("provider: {s}\n", .{self.provider});
+        if (self.status) |status| {
+            try writer.print("status: {d} {s}\n", .{
+                @intFromEnum(status),
+                status.phrase() orelse @tagName(status),
+            });
+        }
+        if (self.body) |body| {
+            const trimmed = std.mem.trim(u8, body, " \t\r\n");
+            if (trimmed.len != 0) {
+                const max_body_len = 4096;
+                const shown = trimmed[0..@min(trimmed.len, max_body_len)];
+                try writer.print("body: {s}\n", .{shown});
+                if (trimmed.len > max_body_len) {
+                    try writer.print("body_truncated: {} bytes omitted\n", .{trimmed.len - max_body_len});
+                }
+            }
+        }
+    }
+};
+
 pub const Completion = struct {
     text: []u8,
     raw_response: []u8,

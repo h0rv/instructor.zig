@@ -483,7 +483,7 @@ createWithArena(T, temp_allocator, result_allocator, provider, request, usage_ou
     provider.appendRetry(temp_allocator, &req, .{ failed_response, parse_error_message })
 ```
 
-## Error model
+## Error model and diagnostics
 
 ```zig
 pub const Error = error{
@@ -496,7 +496,26 @@ pub const Error = error{
 
 Provider adapters can return transport/provider-specific errors too.
 
-V0 returns no rich error payload. Debug hooks can be added later.
+Zig errors have no payload, so providers expose diagnostics separately:
+
+```zig
+const value = session.create(T, req, .{}) catch |err| {
+    instructor.printError(err, &client);
+    return err;
+};
+```
+
+Low-level writer API uses `std.Io.Writer`:
+
+```zig
+try instructor.writeError(writer, err, &client);
+```
+
+Provider diagnostics include optional status/body through:
+
+```zig
+pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
+```
 
 ## Improvements over Go implementation
 

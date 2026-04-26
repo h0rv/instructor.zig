@@ -1,6 +1,7 @@
 const types = @import("types.zig");
 const options = @import("options.zig");
 const create = @import("create.zig");
+const diagnostics = @import("diagnostics.zig");
 const session_mod = @import("session.zig");
 
 pub const Mode = types.Mode;
@@ -8,12 +9,16 @@ pub const Usage = types.Usage;
 pub const StructuredSchema = types.StructuredSchema;
 pub const RetryMessage = types.RetryMessage;
 pub const Completion = types.Completion;
+pub const Diagnostic = types.Diagnostic;
 
 pub const Options = options.Options;
 pub const openai_schema_options = options.openai_schema_options;
 
 pub const Error = create.Error;
 pub const createWithArena = create.createWithArena;
+pub const diagnostic = diagnostics.diagnostic;
+pub const printError = diagnostics.printError;
+pub const writeError = diagnostics.writeError;
 
 pub const Session = session_mod.Session;
 pub const session = session_mod.session;
@@ -22,6 +27,7 @@ test {
     _ = types;
     _ = options;
     _ = create;
+    _ = diagnostics;
     _ = session_mod;
 }
 

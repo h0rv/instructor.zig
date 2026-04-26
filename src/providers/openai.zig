@@ -102,6 +102,14 @@ pub const Client = struct {
         return self.last_error_body;
     }
 
+    pub fn diagnostic(self: *const Client) types.Diagnostic {
+        return .{
+            .provider = "openai",
+            .status = self.last_status,
+            .body = self.last_error_body,
+        };
+    }
+
     pub fn completeStructured(
         self: *Client,
         allocator: std.mem.Allocator,

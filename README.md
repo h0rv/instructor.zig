@@ -53,6 +53,17 @@ pub fn main(init: std.process.Init) !void {
 
 Returned `person` is valid until `session.deinit()` or `session.reset()`.
 
+## Diagnostics
+
+Provider errors expose status/body and can be printed without losing the Zig error:
+
+```zig
+const person = session.create(Person, req, .{}) catch |err| {
+    instructor.printError(err, &client);
+    return err;
+};
+```
+
 ## OpenRouter-compatible endpoint
 
 Use Chat Completions endpoint for OpenRouter and many compatible APIs:

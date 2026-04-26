@@ -66,6 +66,14 @@ Provider decides:
 
 `appendRetry` receives borrowed slices. Provider adapters must copy retry data if they retain it after returning.
 
+Providers may expose diagnostics with:
+
+```zig
+pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
+```
+
+Core helpers `instructor.writeError(writer, err, provider)` and `instructor.printError(err, provider)` print provider status/body when available.
+
 ## Public imports
 
 Users should import only package root:

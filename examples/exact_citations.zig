@@ -57,13 +57,16 @@ pub fn main(init: std.process.Init) !void {
         \\In April 2026, his priority is building reliable agent workflows with citations and typed action plans.
     ;
 
-    const result = try session.create(GroundedAnswer, instructor.OpenAI.Request{
+    const result = session.create(GroundedAnswer, instructor.OpenAI.Request{
         .model = "openai/gpt-oss-20b:free",
         .messages = &.{.{
             .role = .user,
             .content = "Using only this source, answer: what is Robby's April 2026 priority? Include exact supporting quotes.\n\n" ++ source,
         }},
-    }, .{});
+    }, .{}) catch |err| {
+        instructor.printError(err, &client);
+        return err;
+    };
 
     std.debug.print("answer: {s}\nconfidence: {s}\n", .{ result.answer, @tagName(result.confidence) });
     for (result.citations) |citation| std.debug.print("quote: {s}\n", .{citation.quote});

@@ -59,10 +59,13 @@ pub fn main(init: std.process.Init) !void {
         \\Maya: Great. I'll review jsonschema compatibility tomorrow. The launch notes can wait until next week.
     ;
 
-    const result = try session.create(MeetingActions, instructor.OpenAI.Request{
+    const result = session.create(MeetingActions, instructor.OpenAI.Request{
         .model = "openai/gpt-oss-20b:free",
         .messages = &.{.{ .role = .user, .content = "Extract action items from this transcript:\n\n" ++ transcript }},
-    }, .{});
+    }, .{}) catch |err| {
+        instructor.printError(err, &client);
+        return err;
+    };
 
     std.debug.print("summary: {s}\n", .{result.summary});
     for (result.actions) |item| std.debug.print("{s} [{s}] {s} — {s}\n", .{ item.owner, @tagName(item.priority), item.task, item.due });

@@ -335,6 +335,14 @@ zig build run-action-items
 zig build run-agent
 zig build run-native-tool-call
 zig build run-multimodal-inspection
+zig build run-support-router
+zig build run-invoice-extraction
+zig build run-llm-judge
+zig build run-pii-redaction
+zig build run-query-understanding
+zig build run-batch-extract
+zig build run-responses-tool-call
+zig build run-classify-union
 ```
 
 Or use mise tasks. `.mise.toml` loads `.env` for tasks:
@@ -347,6 +355,14 @@ mise run actions
 mise run agent
 mise run tool-call
 mise run multimodal
+mise run router
+mise run invoice
+mise run judge
+mise run redact
+mise run query
+mise run batch
+mise run responses-tool
+mise run classify
 ```
 
 Included examples:
@@ -358,6 +374,14 @@ Included examples:
 - `examples/agent.zig` — typed agent loop using a native Zig tagged union.
 - `examples/native_tool_call.zig` — native Chat Completions tool-call mode.
 - `examples/multimodal_inspection.zig` — Responses API image input to typed visual inspection.
+- `examples/support_router.zig` — typed support-ticket routing.
+- `examples/invoice_extraction.zig` — nested invoice extraction with normalized cents.
+- `examples/llm_judge.zig` — typed eval/judge output.
+- `examples/pii_redaction.zig` — PII/secret detection and redaction plan.
+- `examples/query_understanding.zig` — natural-language query to search filters.
+- `examples/batch_extract.zig` — batch extraction with `session.reset()` lifetimes.
+- `examples/responses_tool_call.zig` — Responses API required tool-call mode.
+- `examples/classify_union.zig` — simple tagged-union classification.
 
 ## Provider adapter contract
 

@@ -30,6 +30,14 @@ pub fn build(b: *std.Build) void {
     const agent_example = addExample(b, mod, target, optimize, "agent-example", "examples/agent.zig", "run-agent", "Run agent example");
     const native_tool_call_example = addExample(b, mod, target, optimize, "native-tool-call-example", "examples/native_tool_call.zig", "run-native-tool-call", "Run native tool-call example");
     const multimodal_inspection_example = addExample(b, mod, target, optimize, "multimodal-inspection-example", "examples/multimodal_inspection.zig", "run-multimodal-inspection", "Run multimodal inspection example");
+    const support_router_example = addExample(b, mod, target, optimize, "support-router-example", "examples/support_router.zig", "run-support-router", "Run support router example");
+    const invoice_extraction_example = addExample(b, mod, target, optimize, "invoice-extraction-example", "examples/invoice_extraction.zig", "run-invoice-extraction", "Run invoice extraction example");
+    const llm_judge_example = addExample(b, mod, target, optimize, "llm-judge-example", "examples/llm_judge.zig", "run-llm-judge", "Run LLM judge example");
+    const pii_redaction_example = addExample(b, mod, target, optimize, "pii-redaction-example", "examples/pii_redaction.zig", "run-pii-redaction", "Run PII redaction example");
+    const query_understanding_example = addExample(b, mod, target, optimize, "query-understanding-example", "examples/query_understanding.zig", "run-query-understanding", "Run query understanding example");
+    const batch_extract_example = addExample(b, mod, target, optimize, "batch-extract-example", "examples/batch_extract.zig", "run-batch-extract", "Run batch extraction example");
+    const responses_tool_call_example = addExample(b, mod, target, optimize, "responses-tool-call-example", "examples/responses_tool_call.zig", "run-responses-tool-call", "Run Responses tool-call example");
+    const classify_union_example = addExample(b, mod, target, optimize, "classify-union-example", "examples/classify_union.zig", "run-classify-union", "Run tagged-union classifier example");
 
     const examples_step = b.step("examples", "Build examples");
     examples_step.dependOn(openrouter_example);
@@ -39,6 +47,14 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(agent_example);
     examples_step.dependOn(native_tool_call_example);
     examples_step.dependOn(multimodal_inspection_example);
+    examples_step.dependOn(support_router_example);
+    examples_step.dependOn(invoice_extraction_example);
+    examples_step.dependOn(llm_judge_example);
+    examples_step.dependOn(pii_redaction_example);
+    examples_step.dependOn(query_understanding_example);
+    examples_step.dependOn(batch_extract_example);
+    examples_step.dependOn(responses_tool_call_example);
+    examples_step.dependOn(classify_union_example);
 
     const tests = b.addTest(.{ .root_module = mod });
     const run_tests = b.addRunArtifact(tests);

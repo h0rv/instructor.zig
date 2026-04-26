@@ -41,7 +41,7 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     const images = [_]instructor.OpenAI.Image{.{
-        .url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/640px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
+        .url = "https://upload.wikimedia.org/wikipedia/commons/a/a9/Example.jpg",
         .detail = "low",
     }};
 

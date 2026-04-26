@@ -39,3 +39,35 @@ run = "zig build run-native-tool-call"
 [tasks.multimodal]
 description = "Run multimodal inspection example"
 run = "zig build run-multimodal-inspection"
+
+[tasks.router]
+description = "Run support router example"
+run = "zig build run-support-router"
+
+[tasks.invoice]
+description = "Run invoice extraction example"
+run = "zig build run-invoice-extraction"
+
+[tasks.judge]
+description = "Run LLM judge example"
+run = "zig build run-llm-judge"
+
+[tasks.redact]
+description = "Run PII redaction example"
+run = "zig build run-pii-redaction"
+
+[tasks.query]
+description = "Run query understanding example"
+run = "zig build run-query-understanding"
+
+[tasks.batch]
+description = "Run batch extraction example"
+run = "zig build run-batch-extract"
+
+[tasks.responses-tool]
+description = "Run Responses tool-call example"
+run = "zig build run-responses-tool-call"
+
+[tasks.classify]
+description = "Run tagged-union classifier example"
+run = "zig build run-classify-union"

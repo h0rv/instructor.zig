@@ -1,14 +1,16 @@
 const std = @import("std");
+const openai = @import("openai");
 const types = @import("../core/types.zig");
 const Options = @import("../core/options.zig").Options;
 
+pub const api = openai;
+
 pub const Client = struct {
     pub const default_model = "gpt-5.4-mini";
+    pub const Api = openai;
 
     allocator: std.mem.Allocator,
-    io: std.Io,
-    api_key: []const u8,
-    base_url: []const u8 = "https://api.openai.com/v1",
+    sdk: openai.Client,
     endpoint: Endpoint = .responses,
     http_referer: ?[]const u8 = null,
     app_name: ?[]const u8 = null,
@@ -73,11 +75,11 @@ pub const Client = struct {
     };
 
     pub fn init(config: Config) Client {
+        var sdk = openai.Client.init(config.allocator, config.io, config.api_key);
+        sdk.withBaseUrl(config.base_url);
         return .{
             .allocator = config.allocator,
-            .io = config.io,
-            .api_key = config.api_key,
-            .base_url = config.base_url,
+            .sdk = sdk,
             .endpoint = config.endpoint,
             .http_referer = config.http_referer,
             .app_name = config.app_name,
@@ -86,6 +88,7 @@ pub const Client = struct {
 
     pub fn deinit(self: *Client) void {
         self.clearLastError();
+        self.sdk.deinit();
     }
 
     pub fn clearLastError(self: *Client) void {
@@ -120,65 +123,37 @@ pub const Client = struct {
         self.clearLastError();
         if (options.mode != .json_schema) return Error.UnsupportedMode;
 
-        const payload = switch (self.endpoint) {
-            .responses => try buildResponsesPayload(allocator, request, schema),
-            .chat_completions => try buildChatCompletionsPayload(allocator, request, schema),
-        };
-        defer allocator.free(payload);
-
-        var raw_response_writer: std.Io.Writer.Allocating = .init(allocator);
-        defer raw_response_writer.deinit();
-
-        const auth = try std.fmt.allocPrint(allocator, "Bearer {s}", .{self.api_key});
-        defer allocator.free(auth);
-
-        const url = try joinUrl(allocator, self.base_url, switch (self.endpoint) {
-            .responses => "responses",
-            .chat_completions => "chat/completions",
-        });
-        defer allocator.free(url);
-
-        var http_client: std.http.Client = .{ .allocator = allocator, .io = self.io };
-        defer http_client.deinit();
-
-        var headers_buf: [4]std.http.Header = undefined;
-        var headers_len: usize = 0;
-        headers_buf[headers_len] = .{ .name = "Authorization", .value = auth };
-        headers_len += 1;
-        headers_buf[headers_len] = .{ .name = "Accept", .value = "application/json" };
-        headers_len += 1;
+        var default_headers_buf: [2]std.http.Header = undefined;
+        var default_headers_len: usize = 0;
         if (self.http_referer) |http_referer| {
-            headers_buf[headers_len] = .{ .name = "HTTP-Referer", .value = http_referer };
-            headers_len += 1;
+            default_headers_buf[default_headers_len] = .{ .name = "HTTP-Referer", .value = http_referer };
+            default_headers_len += 1;
         }
         if (self.app_name) |app_name| {
-            headers_buf[headers_len] = .{ .name = "X-Title", .value = app_name };
-            headers_len += 1;
+            default_headers_buf[default_headers_len] = .{ .name = "X-Title", .value = app_name };
+            default_headers_len += 1;
         }
-        const headers = headers_buf[0..headers_len];
+        const previous_headers = self.sdk.default_headers;
+        self.sdk.default_headers = default_headers_buf[0..default_headers_len];
+        defer self.sdk.default_headers = previous_headers;
 
-        const fetch_result = try http_client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = payload,
-            .response_writer = &raw_response_writer.writer,
-            .headers = .{
-                .content_type = .{ .override = "application/json" },
-            },
-            .extra_headers = headers,
-        });
+        var raw = switch (self.endpoint) {
+            .responses => try postResponses(self, allocator, request, schema),
+            .chat_completions => try postChatCompletions(self, allocator, request, schema),
+        };
+        defer raw.deinit();
 
-        const raw_response = try raw_response_writer.toOwnedSlice();
-        errdefer allocator.free(raw_response);
-
-        if (fetch_result.status.class() != .success or try hasProviderError(allocator, raw_response)) {
-            self.last_status = fetch_result.status;
-            self.last_error_body = try self.allocator.dupe(u8, raw_response);
+        if (raw.status.class() != .success or try hasProviderError(allocator, raw.body)) {
+            self.last_status = raw.status;
+            self.last_error_body = try self.allocator.dupe(u8, raw.body);
             return Error.ProviderHttpError;
         }
 
+        const raw_response = try allocator.dupe(u8, raw.body);
+        errdefer allocator.free(raw_response);
+
         const text = extractOutputText(allocator, raw_response) catch |err| {
-            self.last_status = fetch_result.status;
+            self.last_status = raw.status;
             self.last_error_body = try self.allocator.dupe(u8, raw_response);
             return err;
         };
@@ -238,58 +213,68 @@ pub const Client = struct {
     }
 };
 
-pub fn buildResponsesPayload(
+fn postResponses(
+    client: *Client,
     allocator: std.mem.Allocator,
     request: Client.Request,
     schema: types.StructuredSchema,
-) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
-    const writer = &out.writer;
+) !openai.RawResponse {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
 
-    try writer.writeAll("{");
-    try writeFieldName(writer, "model");
-    try writeJsonString(writer, request.model);
+    var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena_allocator, schema.schema_json, .{});
+    defer parsed_schema.deinit();
 
-    try writer.writeAll(",");
-    try writeMessagesField(writer, "input", request.messages);
-
-    try writer.writeAll(",");
-    try writeFieldName(writer, "text");
-    try writer.writeAll("{\"format\":");
-    try writeJsonSchemaFormat(writer, schema, .responses);
-    try writer.writeAll("}");
-
-    try writeCommonRequestFields(writer, request, .responses);
-
-    try writer.writeAll("}");
-    return out.toOwnedSlice();
+    const body = try buildResponsesRequest(arena_allocator, request, schema, parsed_schema.value);
+    return openai.postJsonRaw(&client.sdk, "/responses", body);
 }
 
-pub fn buildChatCompletionsPayload(
+fn postChatCompletions(
+    client: *Client,
     allocator: std.mem.Allocator,
     request: Client.Request,
     schema: types.StructuredSchema,
-) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    errdefer out.deinit();
-    const writer = &out.writer;
+) !openai.RawResponse {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
 
-    try writer.writeAll("{");
-    try writeFieldName(writer, "model");
-    try writeJsonString(writer, request.model);
+    var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena_allocator, schema.schema_json, .{});
+    defer parsed_schema.deinit();
 
-    try writer.writeAll(",");
-    try writeMessagesField(writer, "messages", request.messages);
+    const body = try buildChatCompletionsRequest(arena_allocator, request, schema, parsed_schema.value);
+    return openai.postJsonRaw(&client.sdk, "/chat/completions", body);
+}
 
-    try writer.writeAll(",");
-    try writeFieldName(writer, "response_format");
-    try writeJsonSchemaFormat(writer, schema, .chat_completions);
+fn buildResponsesRequest(
+    allocator: std.mem.Allocator,
+    request: Client.Request,
+    schema: types.StructuredSchema,
+    schema_value: std.json.Value,
+) !openai.CreateResponse {
+    return .{
+        .model = request.model,
+        .input = try messagesValue(allocator, request.messages),
+        .text = .{ .format = try responsesFormatValue(allocator, schema, schema_value) },
+        .temperature = optionalFloat(request.temperature),
+        .max_output_tokens = optionalU32(request.max_output_tokens),
+    };
+}
 
-    try writeCommonRequestFields(writer, request, .chat_completions);
-
-    try writer.writeAll("}");
-    return out.toOwnedSlice();
+fn buildChatCompletionsRequest(
+    allocator: std.mem.Allocator,
+    request: Client.Request,
+    schema: types.StructuredSchema,
+    schema_value: std.json.Value,
+) !openai.CreateChatCompletionRequest {
+    return .{
+        .model = request.model,
+        .messages = try messagesSlice(allocator, request.messages),
+        .response_format = try chatResponseFormatValue(allocator, schema, schema_value),
+        .temperature = optionalFloat(request.temperature),
+        .max_tokens = if (request.max_output_tokens) |value| @intCast(value) else null,
+    };
 }
 
 fn hasProviderError(allocator: std.mem.Allocator, raw_response: []const u8) !bool {
@@ -398,88 +383,73 @@ fn getU64(value: ?std.json.Value) ?u64 {
     };
 }
 
-fn writeMessagesField(writer: *std.Io.Writer, field_name: []const u8, messages: []const Client.Message) !void {
-    try writeFieldName(writer, field_name);
-    try writer.writeAll("[");
-    for (messages, 0..) |message, i| {
-        if (i != 0) try writer.writeAll(",");
-        try writer.writeAll("{");
-        try writeFieldName(writer, "role");
-        try writeJsonString(writer, roleString(message.role));
-        try writer.writeAll(",");
-        try writeFieldName(writer, "content");
-        try writeJsonString(writer, message.content);
-        try writer.writeAll("}");
+fn messagesValue(allocator: std.mem.Allocator, messages: []const Client.Message) !std.json.Value {
+    var array = std.json.Array.init(allocator);
+    for (messages) |message| {
+        try array.append(try messageValue(allocator, message));
     }
-    try writer.writeAll("]");
+    return .{ .array = array };
 }
 
-fn writeJsonSchemaFormat(writer: *std.Io.Writer, schema: types.StructuredSchema, endpoint: Client.Endpoint) !void {
-    try writer.writeAll("{");
-    try writeFieldName(writer, "type");
-    try writeJsonString(writer, "json_schema");
-
-    switch (endpoint) {
-        .responses => {
-            try writer.writeAll(",");
-            try writeFieldName(writer, "name");
-            try writeJsonString(writer, schema.name);
-            if (schema.description) |description| {
-                try writer.writeAll(",");
-                try writeFieldName(writer, "description");
-                try writeJsonString(writer, description);
-            }
-            try writer.writeAll(",");
-            try writeFieldName(writer, "strict");
-            try writer.writeAll(if (schema.strict) "true" else "false");
-            try writer.writeAll(",");
-            try writeFieldName(writer, "schema");
-            try writer.writeAll(schema.schema_json);
-        },
-        .chat_completions => {
-            try writer.writeAll(",");
-            try writeFieldName(writer, "json_schema");
-            try writer.writeAll("{");
-            try writeFieldName(writer, "name");
-            try writeJsonString(writer, schema.name);
-            if (schema.description) |description| {
-                try writer.writeAll(",");
-                try writeFieldName(writer, "description");
-                try writeJsonString(writer, description);
-            }
-            try writer.writeAll(",");
-            try writeFieldName(writer, "strict");
-            try writer.writeAll(if (schema.strict) "true" else "false");
-            try writer.writeAll(",");
-            try writeFieldName(writer, "schema");
-            try writer.writeAll(schema.schema_json);
-            try writer.writeAll("}");
-        },
+fn messagesSlice(allocator: std.mem.Allocator, messages: []const Client.Message) ![]const openai.ChatCompletionRequestMessage {
+    const result = try allocator.alloc(openai.ChatCompletionRequestMessage, messages.len);
+    for (messages, result) |message, *out| {
+        out.* = .{
+            .role = roleString(message.role),
+            .content = .{ .string = message.content },
+        };
     }
-
-    try writer.writeAll("}");
+    return result;
 }
 
-fn writeCommonRequestFields(writer: *std.Io.Writer, request: Client.Request, endpoint: Client.Endpoint) !void {
-    if (request.temperature) |temperature| {
-        try writer.writeAll(",");
-        try writeFieldName(writer, "temperature");
-        try writer.print("{}", .{temperature});
-    }
-
-    if (request.max_output_tokens) |max_output_tokens| {
-        try writer.writeAll(",");
-        try writeFieldName(writer, switch (endpoint) {
-            .responses => "max_output_tokens",
-            .chat_completions => "max_tokens",
-        });
-        try writer.print("{}", .{max_output_tokens});
-    }
+fn messageValue(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
+    var object = std.json.ObjectMap.empty;
+    try object.put(allocator, "role", .{ .string = roleString(message.role) });
+    try object.put(allocator, "content", .{ .string = message.content });
+    return .{ .object = object };
 }
 
-fn joinUrl(allocator: std.mem.Allocator, base_url: []const u8, path: []const u8) ![]u8 {
-    const trimmed = std.mem.trimEnd(u8, base_url, "/");
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ trimmed, path });
+fn responsesFormatValue(
+    allocator: std.mem.Allocator,
+    schema: types.StructuredSchema,
+    schema_value: std.json.Value,
+) !std.json.Value {
+    var object = std.json.ObjectMap.empty;
+    try object.put(allocator, "type", .{ .string = "json_schema" });
+    try object.put(allocator, "name", .{ .string = schema.name });
+    if (schema.description) |description| {
+        try object.put(allocator, "description", .{ .string = description });
+    }
+    try object.put(allocator, "strict", .{ .bool = schema.strict });
+    try object.put(allocator, "schema", schema_value);
+    return .{ .object = object };
+}
+
+fn chatResponseFormatValue(
+    allocator: std.mem.Allocator,
+    schema: types.StructuredSchema,
+    schema_value: std.json.Value,
+) !std.json.Value {
+    var json_schema = std.json.ObjectMap.empty;
+    try json_schema.put(allocator, "name", .{ .string = schema.name });
+    if (schema.description) |description| {
+        try json_schema.put(allocator, "description", .{ .string = description });
+    }
+    try json_schema.put(allocator, "strict", .{ .bool = schema.strict });
+    try json_schema.put(allocator, "schema", schema_value);
+
+    var object = std.json.ObjectMap.empty;
+    try object.put(allocator, "type", .{ .string = "json_schema" });
+    try object.put(allocator, "json_schema", .{ .object = json_schema });
+    return .{ .object = object };
+}
+
+fn optionalFloat(value: ?f64) ?std.json.Value {
+    return if (value) |v| .{ .float = v } else null;
+}
+
+fn optionalU32(value: ?u32) ?std.json.Value {
+    return if (value) |v| .{ .integer = @intCast(v) } else null;
 }
 
 fn roleString(role: Client.Role) []const u8 {
@@ -490,16 +460,7 @@ fn roleString(role: Client.Role) []const u8 {
     };
 }
 
-fn writeFieldName(writer: *std.Io.Writer, name: []const u8) !void {
-    try writeJsonString(writer, name);
-    try writer.writeAll(":");
-}
-
-fn writeJsonString(writer: *std.Io.Writer, value: []const u8) !void {
-    try std.json.Stringify.value(value, .{}, writer);
-}
-
-test "build responses payload writes raw schema" {
+test "build responses request writes raw schema" {
     const schema: types.StructuredSchema = .{
         .name = "Person",
         .description = "Extract person.",
@@ -510,14 +471,22 @@ test "build responses payload writes raw schema" {
         .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
     };
 
-    const payload = try buildResponsesPayload(std.testing.allocator, request, schema);
-    defer std.testing.allocator.free(payload);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena.allocator(), schema.schema_json, .{});
+    defer parsed_schema.deinit();
+
+    const body = try buildResponsesRequest(arena.allocator(), request, schema, parsed_schema.value);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &out.writer);
+    const payload = out.written();
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"schema\":{\"type\":\"object\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"Person\"") != null);
 }
 
-test "build chat completions payload uses chat max token field" {
+test "build chat completions request uses chat max token field" {
     const schema: types.StructuredSchema = .{
         .name = "Person",
         .schema_json = "{\"type\":\"object\"}",
@@ -528,8 +497,16 @@ test "build chat completions payload uses chat max token field" {
         .max_output_tokens = 128,
     };
 
-    const payload = try buildChatCompletionsPayload(std.testing.allocator, request, schema);
-    defer std.testing.allocator.free(payload);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena.allocator(), schema.schema_json, .{});
+    defer parsed_schema.deinit();
+
+    const body = try buildChatCompletionsRequest(arena.allocator(), request, schema, parsed_schema.value);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &out.writer);
+    const payload = out.written();
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"max_tokens\":128") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"max_output_tokens\"") == null);

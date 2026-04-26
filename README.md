@@ -178,6 +178,8 @@ This keeps schema shape, provider response shape, and parsed Zig type explicit.
 
 ## OpenAI-compatible provider
 
+The provider uses `openai.zig` for the OpenAI HTTP client and generated API surface.
+
 ```zig
 var client = instructor.OpenAI.init(.{
     .allocator = gpa,

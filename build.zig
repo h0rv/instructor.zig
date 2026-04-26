@@ -8,6 +8,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const openai_dep = b.dependency("openai", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const mod = b.addModule("instructor", .{
         .root_source_file = b.path("src/root.zig"),
@@ -15,6 +19,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "jsonschema", .module = jsonschema_dep.module("jsonschema") },
+            .{ .name = "openai", .module = openai_dep.module("openai") },
         },
     });
 

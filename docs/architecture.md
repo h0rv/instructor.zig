@@ -18,7 +18,7 @@ src/
 
   providers/
     mod.zig                provider re-exports
-    openai.zig             OpenAI-compatible provider adapter
+    openai.zig             OpenAI-compatible provider adapter backed by openai.zig SDK
     testing.zig            fake provider for core tests/examples
 ```
 
@@ -59,7 +59,7 @@ appendRetry(...)
 Provider decides:
 
 - HTTP endpoint
-- auth headers
+- auth headers through openai.zig
 - OpenAI-compatible URL override
 - request JSON shape
 - output text extraction

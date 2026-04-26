@@ -8,6 +8,10 @@
             .url = "git+https://github.com/h0rv/jsonschema.zig.git#2e02f53a80a739e1d1a68860b29e1789146a45e1",
             .hash = "jsonschema-0.0.0-hZhxTvTZAQAOEt_OIFzmerF8UZqXGPe3dYmgXamQVWMH",
         },
+        .openai = .{
+            .url = "git+https://github.com/h0rv/openai.zig.git#5f7f70f57fff069224a53b367537ebfe58a5bf3a",
+            .hash = "openai-0.0.0-ZlElDCCwDQBe_3W3PNDm5PhvUAVnzyEOPgxUScqqsiB_",
+        },
     },
     .paths = .{
         "build.zig",

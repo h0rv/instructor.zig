@@ -23,6 +23,33 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const docs_lib = b.addLibrary(.{
+        .name = "instructor",
+        .root_module = mod,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate API docs");
+    docs_step.dependOn(&install_docs.step);
+
+    const serve_docs = b.addExecutable(.{
+        .name = "serve-docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/serve_docs.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_serve_docs = b.addRunArtifact(serve_docs);
+    run_serve_docs.addArg("zig-out/docs");
+    run_serve_docs.addArg("8000");
+    run_serve_docs.step.dependOn(docs_step);
+    const serve_docs_step = b.step("run-serve-docs", "Generate and serve API docs");
+    serve_docs_step.dependOn(&run_serve_docs.step);
+
     const openrouter_example = addExample(b, mod, target, optimize, "openrouter-example", "examples/openrouter.zig", "run-openrouter", "Run OpenRouter example");
     const tool_planner_example = addExample(b, mod, target, optimize, "tool-planner-example", "examples/tool_planner.zig", "run-tool-planner", "Run tool planner example");
     const exact_citations_example = addExample(b, mod, target, optimize, "exact-citations-example", "examples/exact_citations.zig", "run-exact-citations", "Run exact citations example");

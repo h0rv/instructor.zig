@@ -322,6 +322,24 @@ For custom output:
 try instructor.writeError(writer, err, &client);
 ```
 
+## Generated docs
+
+Build Zig API docs:
+
+```sh
+zig build docs
+```
+
+Serve them with the Zig-native dev server:
+
+```sh
+zig build run-serve-docs
+# or
+mise run serve-docs
+```
+
+Open <http://127.0.0.1:8000/>.
+
 ## Examples
 
 Run examples after exporting API keys:

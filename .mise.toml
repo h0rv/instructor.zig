@@ -12,6 +12,14 @@ run = "zig build test"
 description = "Build examples"
 run = "zig build examples"
 
+[tasks.docs]
+description = "Generate Zig API docs"
+run = "zig build docs"
+
+[tasks.serve-docs]
+description = "Generate and serve Zig API docs"
+run = "zig build run-serve-docs"
+
 [tasks.openrouter]
 description = "Run basic OpenRouter example"
 run = "zig build run-openrouter"

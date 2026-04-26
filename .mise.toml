@@ -1,2 +1,33 @@
 [tools]
 zig = "0.16.0"
+
+[env]
+_.file = ".env"
+
+[tasks.test]
+description = "Run tests"
+run = "zig build test"
+
+[tasks.examples]
+description = "Build examples"
+run = "zig build examples"
+
+[tasks.openrouter]
+description = "Run basic OpenRouter example"
+run = "zig build run-openrouter"
+
+[tasks.planner]
+description = "Run tool planner example"
+run = "zig build run-tool-planner"
+
+[tasks.citations]
+description = "Run exact citations example"
+run = "zig build run-exact-citations"
+
+[tasks.actions]
+description = "Run action items example"
+run = "zig build run-action-items"
+
+[tasks.agent]
+description = "Run tagged-union agent example"
+run = "zig build run-agent"

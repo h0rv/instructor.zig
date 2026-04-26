@@ -268,6 +268,16 @@ zig build run-action-items
 zig build run-agent
 ```
 
+Or use mise tasks. `.mise.toml` loads `.env` for tasks:
+
+```sh
+mise run openrouter
+mise run planner
+mise run citations
+mise run actions
+mise run agent
+```
+
 Included examples:
 
 - `examples/openrouter.zig` — basic structured extraction.

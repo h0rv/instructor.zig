@@ -299,7 +299,11 @@ pub const Mode = enum {
 
 `json_schema` is default and maps to provider-native structured output when available.
 
-`json_object` and `tool_call` are reserved. Provider adapters may reject unsupported modes with `error.UnsupportedMode`.
+`json_schema` maps to provider-native structured output when available.
+
+`tool_call` maps to native Chat Completions function tools in the OpenAI-compatible provider. The provider sends `T` as a function tool and returns the first tool call's `function.arguments` as completion text.
+
+`json_object` is reserved. Provider adapters may reject unsupported modes with `error.UnsupportedMode`.
 
 ## Validation policy
 
@@ -550,6 +554,7 @@ Provider responsibilities:
 
 - Convert `StructuredSchema` to OpenAI `text.format = { type: "json_schema", name, schema, strict }` for Responses API.
 - Convert `StructuredSchema` to Chat Completions `response_format = { type: "json_schema", json_schema: { name, schema, strict } }` for OpenRouter-compatible APIs.
+- Convert `StructuredSchema` to Chat Completions function tools for `.tool_call` mode.
 - Emit endpoint-specific token fields: `max_output_tokens` for Responses, `max_tokens` for Chat Completions.
 - Add auth headers.
 - Extract output text.

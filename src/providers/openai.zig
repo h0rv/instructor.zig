@@ -121,7 +121,8 @@ pub const Client = struct {
         comptime options: Options,
     ) !types.Completion {
         self.clearLastError();
-        if (options.mode != .json_schema) return Error.UnsupportedMode;
+        if (options.mode == .json_object) return Error.UnsupportedMode;
+        if (options.mode == .tool_call and self.endpoint != .chat_completions) return Error.UnsupportedMode;
 
         var default_headers_buf: [2]std.http.Header = undefined;
         var default_headers_len: usize = 0;
@@ -139,7 +140,7 @@ pub const Client = struct {
 
         var raw = switch (self.endpoint) {
             .responses => try postResponses(self, allocator, request, schema),
-            .chat_completions => try postChatCompletions(self, allocator, request, schema),
+            .chat_completions => try postChatCompletions(self, allocator, request, schema, options.mode),
         };
         defer raw.deinit();
 
@@ -223,7 +224,7 @@ fn postResponses(
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena_allocator, schema.schema_json, .{});
+    var parsed_schema = try parseSchemaValue(arena_allocator, schema.schema_json);
     defer parsed_schema.deinit();
 
     const body = try buildResponsesRequest(arena_allocator, request, schema, parsed_schema.value);
@@ -235,16 +236,23 @@ fn postChatCompletions(
     allocator: std.mem.Allocator,
     request: Client.Request,
     schema: types.StructuredSchema,
+    mode: types.Mode,
 ) !openai.RawResponse {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena_allocator, schema.schema_json, .{});
+    var parsed_schema = try parseSchemaValue(arena_allocator, schema.schema_json);
     defer parsed_schema.deinit();
 
-    const body = try buildChatCompletionsRequest(arena_allocator, request, schema, parsed_schema.value);
+    const body = try buildChatCompletionsRequest(arena_allocator, request, schema, parsed_schema.value, mode);
     return openai.postJsonRaw(&client.sdk, "/chat/completions", body);
+}
+
+fn parseSchemaValue(allocator: std.mem.Allocator, schema_json: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, allocator, schema_json, .{
+        .duplicate_field_behavior = .use_last,
+    });
 }
 
 fn buildResponsesRequest(
@@ -267,14 +275,24 @@ fn buildChatCompletionsRequest(
     request: Client.Request,
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
+    mode: types.Mode,
 ) !openai.CreateChatCompletionRequest {
-    return .{
+    var body: openai.CreateChatCompletionRequest = .{
         .model = request.model,
         .messages = try messagesSlice(allocator, request.messages),
-        .response_format = try chatResponseFormatValue(allocator, schema, schema_value),
         .temperature = optionalFloat(request.temperature),
         .max_tokens = if (request.max_output_tokens) |value| @intCast(value) else null,
     };
+
+    switch (mode) {
+        .json_schema => body.response_format = try chatResponseFormatValue(allocator, schema, schema_value),
+        .tool_call => {
+            body.tools = try toolSlice(allocator, schema, schema_value);
+        },
+        .json_object => unreachable,
+    }
+
+    return body;
 }
 
 fn hasProviderError(allocator: std.mem.Allocator, raw_response: []const u8) !bool {
@@ -311,6 +329,7 @@ fn findOutputText(value: std.json.Value) ?[]const u8 {
             }
 
             if (object.get("choices")) |choices| {
+                if (findChatChoiceToolArguments(choices)) |text| return text;
                 if (findChatChoiceText(choices)) |text| return text;
             }
         },
@@ -337,6 +356,23 @@ fn findTextInArray(value: std.json.Value) ?[]const u8 {
             }
         }
     }
+    return null;
+}
+
+fn findChatChoiceToolArguments(value: std.json.Value) ?[]const u8 {
+    if (value != .array or value.array.items.len == 0) return null;
+    const choice = value.array.items[0];
+    if (choice != .object) return null;
+    const message = choice.object.get("message") orelse return null;
+    if (message != .object) return null;
+    const tool_calls = message.object.get("tool_calls") orelse return null;
+    if (tool_calls != .array or tool_calls.array.items.len == 0) return null;
+    const tool_call = tool_calls.array.items[0];
+    if (tool_call != .object) return null;
+    const function = tool_call.object.get("function") orelse return null;
+    if (function != .object) return null;
+    const arguments = function.object.get("arguments") orelse return null;
+    if (arguments == .string) return arguments.string;
     return null;
 }
 
@@ -444,6 +480,35 @@ fn chatResponseFormatValue(
     return .{ .object = object };
 }
 
+fn toolSlice(
+    allocator: std.mem.Allocator,
+    schema: types.StructuredSchema,
+    schema_value: std.json.Value,
+) ![]const std.json.Value {
+    const tools = try allocator.alloc(std.json.Value, 1);
+    tools[0] = try toolValue(allocator, schema, schema_value);
+    return tools;
+}
+
+fn toolValue(
+    allocator: std.mem.Allocator,
+    schema: types.StructuredSchema,
+    schema_value: std.json.Value,
+) !std.json.Value {
+    var function = std.json.ObjectMap.empty;
+    try function.put(allocator, "name", .{ .string = schema.name });
+    if (schema.description) |description| {
+        try function.put(allocator, "description", .{ .string = description });
+    }
+    try function.put(allocator, "parameters", schema_value);
+    try function.put(allocator, "strict", .{ .bool = schema.strict });
+
+    var object = std.json.ObjectMap.empty;
+    try object.put(allocator, "type", .{ .string = "function" });
+    try object.put(allocator, "function", .{ .object = function });
+    return .{ .object = object };
+}
+
 fn optionalFloat(value: ?f64) ?std.json.Value {
     return if (value) |v| .{ .float = v } else null;
 }
@@ -502,7 +567,7 @@ test "build chat completions request uses chat max token field" {
     var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena.allocator(), schema.schema_json, .{});
     defer parsed_schema.deinit();
 
-    const body = try buildChatCompletionsRequest(arena.allocator(), request, schema, parsed_schema.value);
+    const body = try buildChatCompletionsRequest(arena.allocator(), request, schema, parsed_schema.value, .json_schema);
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     try std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &out.writer);
@@ -510,6 +575,34 @@ test "build chat completions request uses chat max token field" {
 
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"max_tokens\":128") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"max_output_tokens\"") == null);
+}
+
+test "build chat completions tool call request" {
+    const schema: types.StructuredSchema = .{
+        .name = "extract_person",
+        .description = "Extract person.",
+        .schema_json = "{\"type\":\"object\"}",
+    };
+    const request: Client.Request = .{
+        .model = Client.default_model,
+        .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parsed_schema = try std.json.parseFromSlice(std.json.Value, arena.allocator(), schema.schema_json, .{});
+    defer parsed_schema.deinit();
+
+    const body = try buildChatCompletionsRequest(arena.allocator(), request, schema, parsed_schema.value, .tool_call);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &out.writer);
+    const payload = out.written();
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"tools\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"extract_person\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"tool_choice\":") == null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"response_format\"") == null);
 }
 
 test "extract output text from responses shape" {
@@ -525,5 +618,23 @@ test "extract output text from responses shape" {
     try std.testing.expectEqualStrings("{\"name\":\"Ada\"}", text);
 
     const usage = try extractUsage(std.testing.allocator, raw);
+    try std.testing.expectEqual(@as(u64, 3), usage.total_tokens);
+}
+
+test "extract output text from chat tool call" {
+    const raw =
+        \\{
+        \\  "choices": [{"message": {"tool_calls": [{"function": {"name": "extract_person", "arguments": "{\"name\":\"Ada\"}"}}]}}],
+        \\  "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+        \\}
+    ;
+
+    const text = try extractOutputText(std.testing.allocator, raw);
+    defer std.testing.allocator.free(text);
+    try std.testing.expectEqualStrings("{\"name\":\"Ada\"}", text);
+
+    const usage = try extractUsage(std.testing.allocator, raw);
+    try std.testing.expectEqual(@as(u64, 1), usage.input_tokens);
+    try std.testing.expectEqual(@as(u64, 2), usage.output_tokens);
     try std.testing.expectEqual(@as(u64, 3), usage.total_tokens);
 }

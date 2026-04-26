@@ -238,6 +238,22 @@ pub const HookEvent = enum {
 };
 ```
 
+## Modes
+
+Default mode uses provider structured outputs:
+
+```zig
+const value = try session.create(T, req, .{});
+```
+
+Native Chat Completions tool calls are available with OpenAI-compatible providers:
+
+```zig
+const value = try session.create(T, req, .{ .mode = .tool_call });
+```
+
+Tool-call mode sends `T` as a function tool and parses the returned function `arguments` JSON into `T`.
+
 ## Diagnostics
 
 Provider errors expose optional status and body.
@@ -266,6 +282,7 @@ zig build run-tool-planner
 zig build run-exact-citations
 zig build run-action-items
 zig build run-agent
+zig build run-native-tool-call
 ```
 
 Or use mise tasks. `.mise.toml` loads `.env` for tasks:
@@ -276,6 +293,7 @@ mise run planner
 mise run citations
 mise run actions
 mise run agent
+mise run tool-call
 ```
 
 Included examples:
@@ -285,6 +303,7 @@ Included examples:
 - `examples/exact_citations.zig` — grounded answer with exact quotes.
 - `examples/action_items.zig` — meeting transcript to typed action items.
 - `examples/agent.zig` — typed agent loop using a native Zig tagged union.
+- `examples/native_tool_call.zig` — native Chat Completions tool-call mode.
 
 ## Provider adapter contract
 

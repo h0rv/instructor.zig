@@ -13,12 +13,12 @@ Target Zig version: `0.16.0`.
 - Native Zig tagged-union schemas are available through the updated `jsonschema.zig` dependency.
 - Provider object-root requirements are handled with explicit Zig wrapper structs.
 - OpenAI-compatible provider uses `openai.zig` for HTTP/client plumbing and supports both Responses and Chat Completions endpoints.
+- Native Chat Completions tool-call mode is supported for one function tool.
 - OpenRouter can be used with `.base_url = "https://openrouter.ai/api/v1"` and `.endpoint = .chat_completions`.
 
 ## Deferred
 
 - JSON Schema validation: keep out of core; integrate `validate.zig` or another validator later.
-- Native provider tool-call mode: current examples use structured outputs as typed tool planning.
 - Streaming partial-object parsing.
 - Multimodal request parts.
 - Rich error result type; current provider exposes diagnostics separately.

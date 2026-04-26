@@ -31,3 +31,7 @@ run = "zig build run-action-items"
 [tasks.agent]
 description = "Run tagged-union agent example"
 run = "zig build run-agent"
+
+[tasks.tool-call]
+description = "Run native tool-call example"
+run = "zig build run-native-tool-call"

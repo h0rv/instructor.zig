@@ -1,14 +1,31 @@
 # instructor.zig
 
-Typed structured-output orchestration for Zig.
+[![Zig Version](https://img.shields.io/badge/zig-0.16.0%2B-orange.svg)](https://ziglang.org/download/)
 
-Status: early implementation. Session/provider adapter pattern, parse/retry loop, and OpenAI-compatible Responses + Chat Completions adapters are in place.
+Typed structured outputs for Zig.
 
-## Build
+Define a Zig struct, send its JSON Schema to an OpenAI-compatible provider, and get a typed value back. Memory for returned values is owned by a session arena.
+
+## Install
+
+Add the package from GitHub:
 
 ```sh
-zig build test
+zig fetch --save=instructor git+https://github.com/h0rv/instructor.zig.git
 ```
+
+Then add the module in your `build.zig`:
+
+```zig
+const dep = b.dependency("instructor", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+exe.root_module.addImport("instructor", dep.module("instructor"));
+```
+
+This repository is named `instructor.zig`. The Zig package and module name is `instructor`.
 
 ## Example
 
@@ -33,7 +50,6 @@ pub fn main(init: std.process.Init) !void {
         .allocator = gpa,
         .io = init.io,
         .api_key = init.environ_map.get("OPENAI_API_KEY") orelse return error.MissingApiKey,
-        .base_url = "https://api.openai.com/v1", // override for compatible endpoints
     });
     defer client.deinit();
 
@@ -42,31 +58,65 @@ pub fn main(init: std.process.Init) !void {
 
     const person = try session.create(Person, instructor.OpenAI.Request{
         .model = instructor.OpenAI.default_model,
-        .messages = &.{
-            .{ .role = .user, .content = "Robby is 24." },
-        },
+        .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
     }, .{});
 
     std.debug.print("{s}: {}\n", .{ person.name, person.age });
 }
 ```
 
-Returned `person` is valid until `session.deinit()` or `session.reset()`.
+Output:
 
-## Diagnostics
+```text
+Robby: 24
+```
 
-Provider errors expose status/body and can be printed without losing the Zig error:
+`person` is valid until `session.deinit()` or `session.reset()`.
+
+## API
 
 ```zig
-const person = session.create(Person, req, .{}) catch |err| {
-    instructor.printError(err, &client);
-    return err;
+pub fn session(allocator: std.mem.Allocator, provider: anytype) Session(Provider);
+
+pub fn Session(comptime Provider: type) type;
+```
+
+`Session(Provider)` exposes:
+
+```zig
+pub fn create(
+    self: *Session,
+    comptime T: type,
+    request: anytype,
+    comptime options: Options,
+) !T;
+
+pub fn reset(self: *Session) void;
+pub fn deinit(self: *Session) void;
+```
+
+```zig
+pub const Options = struct {
+    mode: Mode = .json_schema,
+    max_retries: u8 = 3,
+    schema_options: jsonschema.Options = jsonschema.openai_strict_options,
+    parse_options: std.json.ParseOptions = .{ .allocate = .alloc_always },
 };
 ```
 
-## OpenRouter-compatible endpoint
+## OpenAI-compatible provider
 
-Use Chat Completions endpoint for OpenRouter and many compatible APIs:
+```zig
+var client = instructor.OpenAI.init(.{
+    .allocator = gpa,
+    .io = init.io,
+    .api_key = api_key,
+    .base_url = "https://api.openai.com/v1",
+    .endpoint = .responses,
+});
+```
+
+`base_url` and `endpoint` can be changed for compatible APIs:
 
 ```zig
 var client = instructor.OpenAI.init(.{
@@ -80,9 +130,33 @@ var client = instructor.OpenAI.init(.{
 });
 ```
 
-Free OpenRouter models can be used by setting `.model` in the request to the model slug.
+Supported endpoints:
 
-Run examples after exporting `.env`:
+| Endpoint | Path | Schema transport |
+| --- | --- | --- |
+| `.responses` | `/responses` | `text.format` |
+| `.chat_completions` | `/chat/completions` | `response_format` |
+
+## Diagnostics
+
+Provider errors expose optional status and body.
+
+```zig
+const value = session.create(MyType, req, .{}) catch |err| {
+    instructor.printError(err, &client);
+    return err;
+};
+```
+
+For custom output:
+
+```zig
+try instructor.writeError(writer, err, &client);
+```
+
+## Examples
+
+Run examples after exporting API keys:
 
 ```sh
 set -a; . ./.env; set +a
@@ -92,19 +166,49 @@ zig build run-exact-citations
 zig build run-action-items
 ```
 
-## Examples
+Included examples:
 
 - `examples/openrouter.zig` — basic structured extraction.
 - `examples/tool_planner.zig` — function-calling-style typed tool planning.
 - `examples/exact_citations.zig` — grounded answer with exact quotes.
 - `examples/action_items.zig` — meeting transcript to typed action items.
 
-## Docs
+## Provider adapter contract
 
-- `docs/api.md` — v0 API and provider adapter contract
-- `docs/architecture.md` — file/module boundaries
-- `docs/integration-blockers.md` — cross-repo blockers and integration notes
+A provider is any type implementing:
 
-## Validation
+```zig
+pub fn completeStructured(
+    self: *Provider,
+    allocator: std.mem.Allocator,
+    request: Request,
+    schema: instructor.StructuredSchema,
+    comptime options: instructor.Options,
+) !instructor.Completion;
 
-V0 intentionally does not do JSON Schema validation. It only generates schema, calls provider, parses JSON into `T`, and retries parse failures.
+pub fn appendRetry(
+    self: *Provider,
+    allocator: std.mem.Allocator,
+    request: *Request,
+    retry: instructor.RetryMessage,
+) !void;
+```
+
+Optional hooks:
+
+```zig
+pub fn deinitRequest(self: *Provider, allocator: std.mem.Allocator, request: *Request) void;
+pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
+```
+
+`appendRetry` receives borrowed slices. Providers must copy retry data if retaining it after returning.
+
+## Scope
+
+This package orchestrates schema generation, provider calls, parsing, and parse-error retries. It does not validate JSON Schema constraints. Use `jsonschema.zig` for schema generation and a future validator package for value validation.
+
+## Build
+
+```sh
+zig build test
+```

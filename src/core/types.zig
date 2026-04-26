@@ -4,6 +4,9 @@ pub const Mode = enum {
     json_schema,
     json_object,
     tool_call,
+    tool_call_required,
+    responses_tool_call,
+    responses_tool_call_required,
 };
 
 pub const Usage = struct {

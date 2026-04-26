@@ -246,13 +246,24 @@ Default mode uses provider structured outputs:
 const value = try session.create(T, req, .{});
 ```
 
-Native Chat Completions tool calls are available with OpenAI-compatible providers:
+Available modes:
+
+| Mode | Endpoint | Behavior |
+| --- | --- | --- |
+| `.json_schema` | Responses or Chat Completions | Provider-native structured outputs. |
+| `.json_object` | Responses or Chat Completions | JSON mode fallback; parse/retry still applies. |
+| `.tool_call` | Chat Completions | Sends `T` as a function tool and parses first tool-call arguments. |
+| `.tool_call_required` | Chat Completions | Same, with forced function choice. |
+| `.responses_tool_call` | Responses | Sends `T` as a Responses function tool and parses first function-call arguments. |
+| `.responses_tool_call_required` | Responses | Same, with forced function choice. |
+
+Example:
 
 ```zig
 const value = try session.create(T, req, .{ .mode = .tool_call });
 ```
 
-Tool-call mode sends `T` as a function tool and parses the returned function `arguments` JSON into `T`.
+Use required tool modes with OpenAI proper. Some OpenAI-compatible routers reject forced `tool_choice`.
 
 ## Diagnostics
 

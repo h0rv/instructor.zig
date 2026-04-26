@@ -292,18 +292,26 @@ pub const Mode = enum {
     json_schema,
     json_object,
     tool_call,
+    tool_call_required,
+    responses_tool_call,
+    responses_tool_call_required,
 };
 ```
 
 `parse_options.allocate = .alloc_always` recommended so returned `T` does not borrow provider response text.
 
-`json_schema` is default and maps to provider-native structured output when available.
+Modes:
 
-`json_schema` maps to provider-native structured output when available.
+| Mode | Endpoint | Behavior |
+| --- | --- | --- |
+| `.json_schema` | Responses or Chat Completions | Provider-native structured outputs. |
+| `.json_object` | Responses or Chat Completions | JSON mode fallback. |
+| `.tool_call` | Chat Completions | Sends `T` as function tool and parses first tool-call arguments. |
+| `.tool_call_required` | Chat Completions | Same, with forced function choice. |
+| `.responses_tool_call` | Responses | Sends `T` as Responses function tool and parses first function-call arguments. |
+| `.responses_tool_call_required` | Responses | Same, with forced function choice. |
 
-`tool_call` maps to native Chat Completions function tools in the OpenAI-compatible provider. The provider sends `T` as a function tool and returns the first tool call's `function.arguments` as completion text.
-
-`json_object` is reserved. Provider adapters may reject unsupported modes with `error.UnsupportedMode`.
+Provider adapters may reject unsupported endpoint/mode combinations with `error.UnsupportedMode`.
 
 ## Validation policy
 
@@ -554,7 +562,9 @@ Provider responsibilities:
 
 - Convert `StructuredSchema` to OpenAI `text.format = { type: "json_schema", name, schema, strict }` for Responses API.
 - Convert `StructuredSchema` to Chat Completions `response_format = { type: "json_schema", json_schema: { name, schema, strict } }` for OpenRouter-compatible APIs.
-- Convert `StructuredSchema` to Chat Completions function tools for `.tool_call` mode.
+- Convert `StructuredSchema` to Chat Completions function tools for `.tool_call` and `.tool_call_required` modes.
+- Convert `StructuredSchema` to Responses function tools for `.responses_tool_call` and `.responses_tool_call_required` modes.
+- Convert `.json_object` to provider JSON object format.
 - Emit endpoint-specific token fields: `max_output_tokens` for Responses, `max_tokens` for Chat Completions.
 - Add auth headers.
 - Extract output text.

@@ -211,4 +211,5 @@ This package orchestrates schema generation, provider calls, parsing, and parse-
 
 ```sh
 zig build test
+zig build examples
 ```

@@ -23,15 +23,18 @@ pub fn build(b: *std.Build) void {
     const exact_citations_example = addExample(b, mod, target, optimize, "exact-citations-example", "examples/exact_citations.zig", "run-exact-citations", "Run exact citations example");
     const action_items_example = addExample(b, mod, target, optimize, "action-items-example", "examples/action_items.zig", "run-action-items", "Run action items example");
 
+    const examples_step = b.step("examples", "Build examples");
+    examples_step.dependOn(openrouter_example);
+    examples_step.dependOn(tool_planner_example);
+    examples_step.dependOn(exact_citations_example);
+    examples_step.dependOn(action_items_example);
+
     const tests = b.addTest(.{ .root_module = mod });
     const run_tests = b.addRunArtifact(tests);
 
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_tests.step);
-    test_step.dependOn(openrouter_example);
-    test_step.dependOn(tool_planner_example);
-    test_step.dependOn(exact_citations_example);
-    test_step.dependOn(action_items_example);
+    test_step.dependOn(examples_step);
 }
 
 fn addExample(

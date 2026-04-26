@@ -1,6 +1,6 @@
 # `instructor.zig` API spec
 
-Target Zig version: `0.16.0`.
+Target Zig version: `0.16.0` stable APIs.
 
 Status: v0 design. Validation is explicitly out of scope for v0. `validate.zig` or a future JSON Schema validation library can plug in later.
 
@@ -74,6 +74,10 @@ pub fn Session(comptime Provider: type) type {
         arena: std.heap.ArenaAllocator,
         provider: *Provider,
         usage: Usage = .{},
+        last_usage: Usage = .{},
+        last_text: ?[]const u8 = null,
+        last_raw_response: ?[]const u8 = null,
+        hooks: Hooks = .{},
 
         pub fn init(allocator: std.mem.Allocator, provider: *Provider) @This();
         pub fn deinit(self: *@This()) void;
@@ -85,6 +89,14 @@ pub fn Session(comptime Provider: type) type {
             comptime options: Options,
         ) !T;
 
+        pub fn createDetailed(
+            self: *@This(),
+            comptime T: type,
+            request: anytype,
+            comptime options: Options,
+        ) !CreateResult(T);
+
+        pub fn setHooks(self: *@This(), hooks: Hooks) void;
         pub fn reset(self: *@This()) void;
     };
 }
@@ -182,7 +194,7 @@ Use one session per task/batch/request scope. Do not use one global session for 
 
 ## Low-level one-shot API
 
-Core function powering `Session.create`:
+Core functions powering `Session.create` and `Session.createDetailed`:
 
 ```zig
 pub fn createWithArena(
@@ -194,9 +206,20 @@ pub fn createWithArena(
     usage: ?*Usage,
     comptime options: Options,
 ) !T;
+
+pub fn createDetailedWithArena(
+    comptime T: type,
+    temp_allocator: std.mem.Allocator,
+    result_allocator: std.mem.Allocator,
+    provider: anytype,
+    request: anytype,
+    usage: ?*Usage,
+    hooks: ?Hooks,
+    comptime options: Options,
+) !CreateResult(T);
 ```
 
-This returns `T` allocated in caller-provided arena. Caller must ensure arena outlives `T`.
+These return data allocated in caller-provided arena. Caller must ensure arena outlives returned values and slices.
 
 Example:
 
@@ -288,15 +311,72 @@ const ticket = try session.create(Ticket, req2, .{});
 std.debug.print("tokens: {}\n", .{session.usage.total_tokens});
 ```
 
-For per-call usage later, add optional output field:
+Per-call usage is available through `createDetailed()` and `session.last_usage`:
 
 ```zig
-pub const Options = struct {
-    usage: ?*Usage = null, // runtime option if needed later
+const result = try session.createDetailed(User, req, .{});
+std.debug.print("call tokens: {}\n", .{result.usage.total_tokens});
+```
+
+`session.last_text` and `session.last_raw_response` point into the session arena and are replaced by the next successful call.
+
+## Hooks
+
+Hooks use plain function pointers and optional context.
+
+```zig
+pub const HookEvent = enum {
+    request_start,
+    response_received,
+    parse_error,
+    retry,
+    completion_done,
+};
+
+pub const HookInfo = struct {
+    attempt: usize = 0,
+    schema_name: ?[]const u8 = null,
+    response_text: ?[]const u8 = null,
+    raw_response: ?[]const u8 = null,
+    error_name: ?[]const u8 = null,
+    usage: Usage = .{},
+};
+
+pub const HookFn = *const fn (?*anyopaque, HookEvent, HookInfo) void;
+
+pub const Hooks = struct {
+    ctx: ?*anyopaque = null,
+    on_event: ?HookFn = null,
 };
 ```
 
-But v0 keeps `Options` comptime, so per-call usage may be separate argument if needed.
+Example:
+
+```zig
+const State = struct {
+    fn onEvent(ctx: ?*anyopaque, event: instructor.HookEvent, info: instructor.HookInfo) void {
+        _ = ctx;
+        std.debug.print("{s} attempt={}\n", .{ @tagName(event), info.attempt });
+    }
+};
+
+session.setHooks(.{ .on_event = State.onEvent });
+```
+
+## Detailed result
+
+```zig
+pub fn CreateResult(comptime T: type) type {
+    return struct {
+        value: T,
+        text: []const u8,
+        raw_response: []const u8,
+        usage: Usage = .{},
+    };
+}
+```
+
+`text` and `raw_response` are copied into the result arena. With `Session`, they live until `reset()` or `deinit()`.
 
 ## Provider adapter pattern
 
@@ -459,29 +539,42 @@ Free OpenRouter models can be used by setting `.model` in the request to the mod
 
 ```text
 session.create(T, request, options)
-  createWithArena(T, session.arena.allocator(), session.provider, request, &session.usage, options)
+  session.createDetailed(T, request, options)
+  return result.value
 
-createWithArena(T, temp_allocator, result_allocator, provider, request, usage_out, options)
+session.createDetailed(T, request, options)
+  createDetailedWithArena(T, temp_allocator, session.arena.allocator(), provider, request, &session.usage, session.hooks, options)
+  save result.usage/text/raw_response as session.last_*
+
+createDetailedWithArena(T, temp_allocator, result_allocator, provider, request, usage_out, hooks, options)
   req = mutable copy(request)
   schema_json = jsonschema.stringifyAlloc(T, temp_allocator, options.schema_options)
   schema = { name, description, schema_json, strict = true }
+  emit request_start
 
   for attempt in 0..max_retries:
     completion = provider.completeStructured(temp_allocator, req, schema, options)
     usage_out.add(completion.usage)
+    emit response_received
 
     parse_check = std.json.parseFromSliceLeaky(T, temp_attempt_arena, completion.text, options.parse_options)
     if parse ok:
-      value = std.json.parseFromSliceLeaky(T, result_allocator, completion.text, options.parse_options)
+      copy completion.text/raw_response into result_allocator
+      value = std.json.parseFromSliceLeaky(T, result_allocator, copied_text, options.parse_options)
+      emit completion_done
       completion.deinit(temp_allocator)
-      return value
+      return .{ value, text, raw_response, usage }
 
+    emit parse_error
     completion.deinit(temp_allocator)
     if no attempts remain:
       return error.MaxRetriesExceeded
 
     provider.appendRetry(temp_allocator, &req, .{ failed_response, parse_error_message })
+    emit retry
 ```
+
+`createWithArena()` follows the same parse/retry flow but returns only `T` and does not retain response text/raw response.
 
 ## Error model and diagnostics
 
@@ -526,12 +619,12 @@ pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
 - Provider request types stay concrete.
 - Validation not mixed into core orchestration.
 
-## First implementation milestones
+## Current scope
 
-1. Compile clean library build.
-2. `Session` arena owner.
-3. `createWithArena()` parse/retry loop returns `T`.
-4. Fake provider tests for success and retry.
-5. Minimal OpenAI adapter skeleton.
-6. Real OpenAI Responses HTTP implementation.
-7. Optional `validate.zig` integration later.
+- Clean Zig `0.16.0` library build.
+- Session-owned direct `T` API.
+- Detailed result API for raw response, response text, and per-call usage.
+- Hook API for request/response/parse/retry/completion events.
+- Fake provider tests for success, retry, detailed result, and hooks.
+- OpenAI-compatible HTTP provider for Responses and Chat Completions.
+- Optional validation integration later.

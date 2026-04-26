@@ -30,6 +30,43 @@ pub const RetryMessage = struct {
     error_message: []const u8,
 };
 
+pub fn CreateResult(comptime T: type) type {
+    return struct {
+        value: T,
+        text: []const u8,
+        raw_response: []const u8,
+        usage: Usage = .{},
+    };
+}
+
+pub const HookEvent = enum {
+    request_start,
+    response_received,
+    parse_error,
+    retry,
+    completion_done,
+};
+
+pub const HookInfo = struct {
+    attempt: usize = 0,
+    schema_name: ?[]const u8 = null,
+    response_text: ?[]const u8 = null,
+    raw_response: ?[]const u8 = null,
+    error_name: ?[]const u8 = null,
+    usage: Usage = .{},
+};
+
+pub const HookFn = *const fn (ctx: ?*anyopaque, event: HookEvent, info: HookInfo) void;
+
+pub const Hooks = struct {
+    ctx: ?*anyopaque = null,
+    on_event: ?HookFn = null,
+
+    pub fn emit(self: Hooks, event: HookEvent, info: HookInfo) void {
+        if (self.on_event) |on_event| on_event(self.ctx, event, info);
+    }
+};
+
 pub const Diagnostic = struct {
     provider: []const u8 = "unknown",
     status: ?std.http.Status = null,

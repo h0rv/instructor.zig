@@ -10,6 +10,10 @@ pub fn Session(comptime Provider: type) type {
         arena: std.heap.ArenaAllocator,
         provider: *Provider,
         usage: types.Usage = .{},
+        last_usage: types.Usage = .{},
+        last_text: ?[]const u8 = null,
+        last_raw_response: ?[]const u8 = null,
+        hooks: types.Hooks = .{},
 
         const Self = @This();
 
@@ -30,6 +34,13 @@ pub fn Session(comptime Provider: type) type {
             self.arena.deinit();
             self.arena = std.heap.ArenaAllocator.init(self.allocator);
             self.usage = .{};
+            self.last_usage = .{};
+            self.last_text = null;
+            self.last_raw_response = null;
+        }
+
+        pub fn setHooks(self: *Self, hooks: types.Hooks) void {
+            self.hooks = hooks;
         }
 
         pub fn create(
@@ -38,15 +49,30 @@ pub fn Session(comptime Provider: type) type {
             request: anytype,
             comptime options: options_mod.Options,
         ) !T {
-            return create_mod.createWithArena(
+            const result = try self.createDetailed(T, request, options);
+            return result.value;
+        }
+
+        pub fn createDetailed(
+            self: *Self,
+            comptime T: type,
+            request: anytype,
+            comptime options: options_mod.Options,
+        ) !types.CreateResult(T) {
+            const result = try create_mod.createDetailedWithArena(
                 T,
                 self.allocator,
                 self.arena.allocator(),
                 self.provider,
                 request,
                 &self.usage,
+                self.hooks,
                 options,
             );
+            self.last_usage = result.usage;
+            self.last_text = result.text;
+            self.last_raw_response = result.raw_response;
+            return result;
         }
     };
 }

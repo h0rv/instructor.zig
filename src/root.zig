@@ -7,11 +7,16 @@ pub const StructuredSchema = core.StructuredSchema;
 pub const RetryMessage = core.RetryMessage;
 pub const Completion = core.Completion;
 pub const Diagnostic = core.Diagnostic;
+pub const HookEvent = core.HookEvent;
+pub const HookInfo = core.HookInfo;
+pub const Hooks = core.Hooks;
+pub const CreateResult = core.CreateResult;
 
 pub const Options = core.Options;
 pub const Error = core.Error;
 pub const Session = core.Session;
 pub const createWithArena = core.createWithArena;
+pub const createDetailedWithArena = core.createDetailedWithArena;
 pub const diagnostic = core.diagnostic;
 pub const printError = core.printError;
 pub const writeError = core.writeError;

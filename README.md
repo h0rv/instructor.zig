@@ -4,6 +4,8 @@
 
 Typed structured outputs for Zig.
 
+Targets Zig `0.16.0` stable APIs.
+
 Define a Zig struct, send its JSON Schema to an OpenAI-compatible provider, and get a typed value back. Memory for returned values is owned by a session arena.
 
 ## Install
@@ -84,6 +86,11 @@ pub fn Session(comptime Provider: type) type;
 `Session(Provider)` exposes:
 
 ```zig
+usage: Usage,
+last_usage: Usage,
+last_text: ?[]const u8,
+last_raw_response: ?[]const u8,
+
 pub fn create(
     self: *Session,
     comptime T: type,
@@ -91,8 +98,27 @@ pub fn create(
     comptime options: Options,
 ) !T;
 
+pub fn createDetailed(
+    self: *Session,
+    comptime T: type,
+    request: anytype,
+    comptime options: Options,
+) !CreateResult(T);
+
+pub fn setHooks(self: *Session, hooks: Hooks) void;
 pub fn reset(self: *Session) void;
 pub fn deinit(self: *Session) void;
+```
+
+```zig
+pub fn CreateResult(comptime T: type) type {
+    return struct {
+        value: T,
+        text: []const u8,
+        raw_response: []const u8,
+        usage: Usage,
+    };
+}
 ```
 
 ```zig
@@ -136,6 +162,33 @@ Supported endpoints:
 | --- | --- | --- |
 | `.responses` | `/responses` | `text.format` |
 | `.chat_completions` | `/chat/completions` | `response_format` |
+
+## Hooks
+
+Hooks observe requests, responses, parse errors, retries, and completions.
+
+```zig
+const State = struct {
+    fn onEvent(ctx: ?*anyopaque, event: instructor.HookEvent, info: instructor.HookInfo) void {
+        _ = ctx;
+        std.debug.print("{s} attempt={}\n", .{ @tagName(event), info.attempt });
+    }
+};
+
+session.setHooks(.{ .on_event = State.onEvent });
+```
+
+Events:
+
+```zig
+pub const HookEvent = enum {
+    request_start,
+    response_received,
+    parse_error,
+    retry,
+    completion_done,
+};
+```
 
 ## Diagnostics
 

@@ -10,10 +10,10 @@ src/
 
   core/
     mod.zig                core re-exports + tests
-    types.zig              shared public structs: Usage, Completion, StructuredSchema
+    types.zig              shared public structs: Usage, Completion, StructuredSchema, Hooks
     options.zig            Options + schema profile defaults
     session.zig            Session arena owner + session() helper
-    create.zig             createWithArena parse/retry loop
+    create.zig             createWithArena/createDetailedWithArena parse/retry loop
     util.zig               tiny comptime helpers
 
   providers/
@@ -33,6 +33,8 @@ Core does:
 - parse JSON into caller/session arena
 - retry parse failures
 - accumulate usage
+- emit hooks
+- retain per-call text/raw response for detailed results
 
 Core does not:
 
@@ -43,7 +45,7 @@ Core does not:
 
 ### Session owns result lifetime
 
-`Session` owns arena for returned values. `session.create(T, req, .{})` returns `T` directly. Returned values die at `session.deinit()` or `session.reset()`.
+`Session` owns arena for returned values. `session.create(T, req, .{})` returns `T` directly. `session.createDetailed(T, req, .{})` returns value plus response text, raw response, and per-call usage. Returned values and detailed response slices die at `session.deinit()` or `session.reset()`.
 
 ### Provider owns transport + retry mutation
 

@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .jsonschema = .{
-            .url = "git+https://github.com/h0rv/jsonschema.zig.git#19a9559d19f2c21f2e0c6ebef1c4c9db93fb20dc",
-            .hash = "jsonschema-0.0.0-hZhxTul4AQDQEXRMqABYR-Yvybho6IVfE-WTtNBTcBDq",
+            .url = "git+https://github.com/h0rv/jsonschema.zig.git#2e02f53a80a739e1d1a68860b29e1789146a45e1",
+            .hash = "jsonschema-0.0.0-hZhxTvTZAQAOEt_OIFzmerF8UZqXGPe3dYmgXamQVWMH",
         },
     },
     .paths = .{

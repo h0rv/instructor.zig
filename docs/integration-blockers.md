@@ -10,6 +10,7 @@ Target Zig version: `0.16.0`.
 - Primary API returns `T` directly through a session-owned arena.
 - Detailed API exposes response text, raw response, and per-call usage.
 - Session hooks cover request, response, parse error, retry, and completion events.
+- Native Zig tagged-union schemas are available through the updated `jsonschema.zig` dependency.
 - OpenAI-compatible provider supports both Responses and Chat Completions endpoints.
 - OpenRouter can be used with `.base_url = "https://openrouter.ai/api/v1"` and `.endpoint = .chat_completions`.
 

@@ -217,6 +217,7 @@ zig build run-openrouter
 zig build run-tool-planner
 zig build run-exact-citations
 zig build run-action-items
+zig build run-agent
 ```
 
 Included examples:
@@ -225,6 +226,7 @@ Included examples:
 - `examples/tool_planner.zig` — function-calling-style typed tool planning.
 - `examples/exact_citations.zig` — grounded answer with exact quotes.
 - `examples/action_items.zig` — meeting transcript to typed action items.
+- `examples/agent.zig` — typed agent loop using a native Zig tagged union.
 
 ## Provider adapter contract
 

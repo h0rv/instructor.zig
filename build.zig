@@ -22,12 +22,14 @@ pub fn build(b: *std.Build) void {
     const tool_planner_example = addExample(b, mod, target, optimize, "tool-planner-example", "examples/tool_planner.zig", "run-tool-planner", "Run tool planner example");
     const exact_citations_example = addExample(b, mod, target, optimize, "exact-citations-example", "examples/exact_citations.zig", "run-exact-citations", "Run exact citations example");
     const action_items_example = addExample(b, mod, target, optimize, "action-items-example", "examples/action_items.zig", "run-action-items", "Run action items example");
+    const agent_example = addExample(b, mod, target, optimize, "agent-example", "examples/agent.zig", "run-agent", "Run agent example");
 
     const examples_step = b.step("examples", "Build examples");
     examples_step.dependOn(openrouter_example);
     examples_step.dependOn(tool_planner_example);
     examples_step.dependOn(exact_citations_example);
     examples_step.dependOn(action_items_example);
+    examples_step.dependOn(agent_example);
 
     const tests = b.addTest(.{ .root_module = mod });
     const run_tests = b.addRunArtifact(tests);

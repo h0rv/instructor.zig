@@ -130,6 +130,52 @@ pub const Options = struct {
 };
 ```
 
+## Object roots
+
+Some provider structured-output modes require the root schema to be an object. Wrap root arrays or root unions in a normal Zig struct and use `create` as usual.
+
+For arrays:
+
+```zig
+const ActionItem = struct {
+    task: []const u8,
+    owner: []const u8,
+};
+
+const ActionItems = struct {
+    items: []const ActionItem,
+
+    pub const jsonschema = .{
+        .name = "ActionItems",
+        .description = "Extract action items.",
+        .fields = .{
+            .items = .{ .description = "Action items." },
+        },
+    };
+};
+
+const result = try session.create(ActionItems, req, .{});
+for (result.items) |item| {
+    std.debug.print("{s}: {s}\n", .{ item.owner, item.task });
+}
+```
+
+For unions:
+
+```zig
+const Next = struct {
+    action: Action,
+};
+
+const next = try session.create(Next, req, .{});
+switch (next.action) {
+    .search => |search| ...,
+    .finish => |finish| ...,
+}
+```
+
+This keeps schema shape, provider response shape, and parsed Zig type explicit.
+
 ## OpenAI-compatible provider
 
 ```zig

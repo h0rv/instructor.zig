@@ -238,6 +238,44 @@ const person = try instructor.createWithArena(
 );
 ```
 
+## Object roots
+
+Some provider structured-output modes require an object root. `instructor.zig` does not hide this with schema transforms. Define the object root as a Zig type and call `create` normally.
+
+Root array:
+
+```zig
+const Item = struct {
+    task: []const u8,
+};
+
+const Items = struct {
+    items: []const Item,
+
+    pub const jsonschema = .{
+        .name = "Items",
+        .fields = .{
+            .items = .{ .description = "Extracted items." },
+        },
+    };
+};
+
+const result = try session.create(Items, req, .{});
+const items = result.items;
+```
+
+Root union:
+
+```zig
+const Next = struct {
+    action: Action,
+};
+
+const next = try session.create(Next, req, .{});
+```
+
+This mirrors Zig's explicit-type style and avoids dynamic wrapper/unwrapper state.
+
 ## Options
 
 ```zig

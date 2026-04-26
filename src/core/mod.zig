@@ -102,6 +102,40 @@ test "session createDetailed exposes raw response and per-call usage" {
     try std.testing.expect(std.mem.indexOf(u8, result.raw_response, "mock response 0") != null);
 }
 
+test "explicit object wrapper supports root arrays" {
+    const std = @import("std");
+    const testing = @import("../providers/testing.zig");
+
+    const Item = struct {
+        task: []const u8,
+    };
+
+    const Items = struct {
+        items: []const Item,
+
+        pub const jsonschema = .{
+            .name = "Items",
+            .description = "Object root wrapper for extracted items.",
+            .fields = .{
+                .items = .{ .description = "Extracted items." },
+            },
+        };
+    };
+
+    var provider: testing.Provider = .{
+        .responses = &.{"{\"items\":[{\"task\":\"ship docs\"},{\"task\":\"write tests\"}]}"},
+    };
+
+    var s = session(std.testing.allocator, &provider);
+    defer s.deinit();
+
+    const result = try s.create(Items, testing.Request{}, .{});
+
+    try std.testing.expectEqual(@as(usize, 2), result.items.len);
+    try std.testing.expectEqualStrings("ship docs", result.items[0].task);
+    try std.testing.expectEqualStrings("write tests", result.items[1].task);
+}
+
 test "session hooks report retry flow" {
     const std = @import("std");
     const testing = @import("../providers/testing.zig");

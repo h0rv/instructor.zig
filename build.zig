@@ -29,6 +29,7 @@ pub fn build(b: *std.Build) void {
     const action_items_example = addExample(b, mod, target, optimize, "action-items-example", "examples/action_items.zig", "run-action-items", "Run action items example");
     const agent_example = addExample(b, mod, target, optimize, "agent-example", "examples/agent.zig", "run-agent", "Run agent example");
     const native_tool_call_example = addExample(b, mod, target, optimize, "native-tool-call-example", "examples/native_tool_call.zig", "run-native-tool-call", "Run native tool-call example");
+    const multimodal_inspection_example = addExample(b, mod, target, optimize, "multimodal-inspection-example", "examples/multimodal_inspection.zig", "run-multimodal-inspection", "Run multimodal inspection example");
 
     const examples_step = b.step("examples", "Build examples");
     examples_step.dependOn(openrouter_example);
@@ -37,6 +38,7 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(action_items_example);
     examples_step.dependOn(agent_example);
     examples_step.dependOn(native_tool_call_example);
+    examples_step.dependOn(multimodal_inspection_example);
 
     const tests = b.addTest(.{ .root_module = mod });
     const run_tests = b.addRunArtifact(tests);

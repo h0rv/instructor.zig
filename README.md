@@ -279,6 +279,24 @@ Available modes:
 | `.responses_tool_call` | Responses | Sends `T` as a Responses function tool and parses first function-call arguments. |
 | `.responses_tool_call_required` | Responses | Same, with forced function choice. |
 
+Messages may include image URLs for multimodal Responses or Chat Completions requests:
+
+```zig
+const images = [_]instructor.OpenAI.Image{.{
+    .url = "https://example.com/image.jpg",
+    .detail = "low",
+}};
+
+const value = try session.create(T, .{
+    .model = "gpt-5.4-nano",
+    .messages = &.{.{
+        .role = .user,
+        .content = "Inspect this image.",
+        .images = &images,
+    }},
+}, .{});
+```
+
 Example:
 
 ```zig
@@ -316,6 +334,7 @@ zig build run-exact-citations
 zig build run-action-items
 zig build run-agent
 zig build run-native-tool-call
+zig build run-multimodal-inspection
 ```
 
 Or use mise tasks. `.mise.toml` loads `.env` for tasks:
@@ -327,6 +346,7 @@ mise run citations
 mise run actions
 mise run agent
 mise run tool-call
+mise run multimodal
 ```
 
 Included examples:
@@ -337,6 +357,7 @@ Included examples:
 - `examples/action_items.zig` — meeting transcript to typed action items.
 - `examples/agent.zig` — typed agent loop using a native Zig tagged union.
 - `examples/native_tool_call.zig` — native Chat Completions tool-call mode.
+- `examples/multimodal_inspection.zig` — Responses API image input to typed visual inspection.
 
 ## Provider adapter contract
 

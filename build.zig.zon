@@ -9,8 +9,8 @@
             .hash = "jsonschema-0.0.0-hZhxTktcAgDAfsGn-jEtcPozX2DK1QIsdPN1x7daH4JR",
         },
         .openai = .{
-            .url = "git+https://github.com/h0rv/openai.zig.git#5f7f70f57fff069224a53b367537ebfe58a5bf3a",
-            .hash = "openai-0.0.0-ZlElDCCwDQBe_3W3PNDm5PhvUAVnzyEOPgxUScqqsiB_",
+            .url = "git+https://github.com/h0rv/openai.zig.git#1474c7a9221f2837b1d389a956f26a50c6bb3d21",
+            .hash = "openai-0.0.0-ZlElDPQlDQDHWikbRFx82mnuU_GYxfuquHkEaVzZSq4H",
         },
     },
     .paths = .{

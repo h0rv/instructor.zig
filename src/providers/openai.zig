@@ -66,6 +66,12 @@ pub const Client = struct {
     pub const Message = struct {
         role: Role,
         content: []const u8,
+        images: []const Image = &.{},
+    };
+
+    pub const Image = struct {
+        url: []const u8,
+        detail: ?[]const u8 = null,
     };
 
     pub const Role = enum {
@@ -277,18 +283,18 @@ fn buildResponsesRequest(
 ) !openai.CreateResponse {
     var body: openai.CreateResponse = .{
         .model = request.model,
-        .input = try messagesValue(allocator, request.messages),
-        .temperature = optionalFloat(request.temperature),
-        .max_output_tokens = optionalU32(request.max_output_tokens),
+        .input = .{ .input_item_list = try inputItems(allocator, request.messages) },
+        .temperature = request.temperature,
+        .max_output_tokens = if (request.max_output_tokens) |value| @as(?i64, @intCast(value)) else null,
     };
 
     switch (mode) {
-        .json_schema => body.text = .{ .format = try responsesFormatValue(allocator, schema, schema_value) },
-        .json_object => body.text = .{ .format = try jsonObjectFormatValue(allocator) },
+        .json_schema => body.text = .{ .format = responsesFormat(schema, schema_value) },
+        .json_object => body.text = .{ .format = .{ .responseformatjsonobject = .{ .type = "json_object" } } },
         .responses_tool_call, .responses_tool_call_required => {
             body.tools = try responsesToolSlice(allocator, schema, schema_value);
             if (mode == .responses_tool_call_required) {
-                body.tool_choice = try responsesToolChoiceValue(allocator, schema.name);
+                body.tool_choice = .{ .toolchoicefunction = .{ .type = "function", .name = schema.name } };
             }
         },
         .tool_call, .tool_call_required => unreachable,
@@ -307,7 +313,7 @@ fn buildChatCompletionsRequest(
     var body: openai.CreateChatCompletionRequest = .{
         .model = request.model,
         .messages = try messagesSlice(allocator, request.messages),
-        .temperature = optionalFloat(request.temperature),
+        .temperature = request.temperature,
         .max_tokens = if (request.max_output_tokens) |value| @intCast(value) else null,
     };
 
@@ -317,7 +323,7 @@ fn buildChatCompletionsRequest(
         .tool_call, .tool_call_required => {
             body.tools = try chatToolSlice(allocator, schema, schema_value);
             if (mode == .tool_call_required) {
-                body.tool_choice = try chatToolChoiceValue(allocator, schema.name);
+                body.tool_choice = .{ .raw = try chatToolChoiceValue(allocator, schema.name) };
             }
         },
         .responses_tool_call, .responses_tool_call_required => unreachable,
@@ -454,12 +460,18 @@ fn getU64(value: ?std.json.Value) ?u64 {
     };
 }
 
-fn messagesValue(allocator: std.mem.Allocator, messages: []const Client.Message) !std.json.Value {
-    var array = std.json.Array.init(allocator);
-    for (messages) |message| {
-        try array.append(try messageValue(allocator, message));
+fn inputItems(allocator: std.mem.Allocator, messages: []const Client.Message) ![]const openai.InputItem {
+    const result = try allocator.alloc(openai.InputItem, messages.len);
+    for (messages, result) |message, *out| {
+        out.* = .{ .easyinputmessage = .{
+            .role = roleString(message.role),
+            .content = if (message.images.len == 0)
+                .{ .string = message.content }
+            else
+                try responsesContentParts(allocator, message),
+        } };
     }
-    return .{ .array = array };
+    return result;
 }
 
 fn messagesSlice(allocator: std.mem.Allocator, messages: []const Client.Message) ![]const openai.ChatCompletionRequestMessage {
@@ -467,33 +479,75 @@ fn messagesSlice(allocator: std.mem.Allocator, messages: []const Client.Message)
     for (messages, result) |message, *out| {
         out.* = .{
             .role = roleString(message.role),
-            .content = .{ .string = message.content },
+            .content = if (message.images.len == 0)
+                .{ .string = message.content }
+            else
+                try chatContentParts(allocator, message),
         };
     }
     return result;
 }
 
-fn messageValue(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
-    var object = std.json.ObjectMap.empty;
-    try object.put(allocator, "role", .{ .string = roleString(message.role) });
-    try object.put(allocator, "content", .{ .string = message.content });
-    return .{ .object = object };
+fn responsesContentParts(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
+    var parts = std.json.Array.init(allocator);
+
+    if (message.content.len != 0) {
+        var text = std.json.ObjectMap.empty;
+        try text.put(allocator, "type", .{ .string = "input_text" });
+        try text.put(allocator, "text", .{ .string = message.content });
+        try parts.append(.{ .object = text });
+    }
+
+    for (message.images) |image| {
+        var part = std.json.ObjectMap.empty;
+        try part.put(allocator, "type", .{ .string = "input_image" });
+        try part.put(allocator, "image_url", .{ .string = image.url });
+        if (image.detail) |detail| {
+            try part.put(allocator, "detail", .{ .string = detail });
+        }
+        try parts.append(.{ .object = part });
+    }
+
+    return .{ .array = parts };
 }
 
-fn responsesFormatValue(
-    allocator: std.mem.Allocator,
+fn chatContentParts(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
+    var parts = std.json.Array.init(allocator);
+
+    if (message.content.len != 0) {
+        var text = std.json.ObjectMap.empty;
+        try text.put(allocator, "type", .{ .string = "text" });
+        try text.put(allocator, "text", .{ .string = message.content });
+        try parts.append(.{ .object = text });
+    }
+
+    for (message.images) |image| {
+        var image_url = std.json.ObjectMap.empty;
+        try image_url.put(allocator, "url", .{ .string = image.url });
+        if (image.detail) |detail| {
+            try image_url.put(allocator, "detail", .{ .string = detail });
+        }
+
+        var part = std.json.ObjectMap.empty;
+        try part.put(allocator, "type", .{ .string = "image_url" });
+        try part.put(allocator, "image_url", .{ .object = image_url });
+        try parts.append(.{ .object = part });
+    }
+
+    return .{ .array = parts };
+}
+
+fn responsesFormat(
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
-) !std.json.Value {
-    var object = std.json.ObjectMap.empty;
-    try object.put(allocator, "type", .{ .string = "json_schema" });
-    try object.put(allocator, "name", .{ .string = schema.name });
-    if (schema.description) |description| {
-        try object.put(allocator, "description", .{ .string = description });
-    }
-    try object.put(allocator, "strict", .{ .bool = schema.strict });
-    try object.put(allocator, "schema", schema_value);
-    return .{ .object = object };
+) openai.TextResponseFormatConfiguration {
+    return .{ .textresponseformatjsonschema = .{
+        .type = "json_schema",
+        .name = schema.name,
+        .description = schema.description,
+        .strict = @as(?bool, schema.strict),
+        .schema = schema_value,
+    } };
 }
 
 fn chatResponseFormatValue(
@@ -558,27 +612,16 @@ fn responsesToolSlice(
     allocator: std.mem.Allocator,
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
-) ![]const std.json.Value {
-    const tools = try allocator.alloc(std.json.Value, 1);
-    tools[0] = try responsesToolValue(allocator, schema, schema_value);
+) !openai.ToolsArray {
+    const tools = try allocator.alloc(openai.Tool, 1);
+    tools[0] = .{ .functiontool = .{
+        .type = "function",
+        .name = schema.name,
+        .description = schema.description,
+        .parameters = schema_value,
+        .strict = schema.strict,
+    } };
     return tools;
-}
-
-fn responsesToolValue(
-    allocator: std.mem.Allocator,
-    schema: types.StructuredSchema,
-    schema_value: std.json.Value,
-) !std.json.Value {
-    var object = try functionObject(allocator, schema, schema_value);
-    try object.put(allocator, "type", .{ .string = "function" });
-    return .{ .object = object };
-}
-
-fn responsesToolChoiceValue(allocator: std.mem.Allocator, name: []const u8) !std.json.Value {
-    var object = std.json.ObjectMap.empty;
-    try object.put(allocator, "type", .{ .string = "function" });
-    try object.put(allocator, "name", .{ .string = name });
-    return .{ .object = object };
 }
 
 fn functionObject(
@@ -596,10 +639,6 @@ fn functionObject(
     return function;
 }
 
-fn optionalFloat(value: ?f64) ?std.json.Value {
-    return if (value) |v| .{ .float = v } else null;
-}
-
 fn optionalU32(value: ?u32) ?std.json.Value {
     return if (value) |v| .{ .integer = @intCast(v) } else null;
 }
@@ -610,6 +649,33 @@ fn roleString(role: Client.Role) []const u8 {
         .user => "user",
         .assistant => "assistant",
     };
+}
+
+test "build responses request supports multimodal input" {
+    const schema: types.StructuredSchema = .{
+        .name = "ImageSummary",
+        .schema_json = "{\"type\":\"object\"}",
+    };
+    const images = [_]Client.Image{.{ .url = "https://example.com/image.jpg", .detail = "low" }};
+    const request: Client.Request = .{
+        .model = Client.default_model,
+        .messages = &.{.{ .role = .user, .content = "Describe this image.", .images = &images }},
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var parsed_schema = try parseSchemaValue(arena.allocator(), schema.schema_json);
+    defer parsed_schema.deinit();
+
+    const body = try buildResponsesRequest(arena.allocator(), request, schema, parsed_schema.value, .json_schema);
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(body, .{ .emit_null_optional_fields = false }, &out.writer);
+    const payload = out.written();
+
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"input_text\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"input_image\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "https://example.com/image.jpg") != null);
 }
 
 test "build responses request writes raw schema" {

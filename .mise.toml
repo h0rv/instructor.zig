@@ -35,3 +35,7 @@ run = "zig build run-agent"
 [tasks.tool-call]
 description = "Run native tool-call example"
 run = "zig build run-native-tool-call"
+
+[tasks.multimodal]
+description = "Run multimodal inspection example"
+run = "zig build run-multimodal-inspection"

@@ -1,0 +1,21 @@
+.{
+    .name = .instructor,
+    .version = "0.0.0",
+    .fingerprint = 0x31fc43dd5961042b, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .jsonschema = .{
+            .url = "git+https://github.com/h0rv/jsonschema.zig.git#19a9559d19f2c21f2e0c6ebef1c4c9db93fb20dc",
+            .hash = "jsonschema-0.0.0-hZhxTul4AQDQEXRMqABYR-Yvybho6IVfE-WTtNBTcBDq",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "docs",
+        "LICENSE",
+        "README.md",
+    },
+}

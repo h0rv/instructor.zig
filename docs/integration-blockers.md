@@ -5,7 +5,7 @@ Target Zig version: `0.16.0`.
 ## Resolved for current scaffold
 
 - `jsonschema.zig` is now consumed from `github.com/h0rv/jsonschema.zig` with a pinned commit and package hash.
-- `jsonschema` options are comptime and `openai_strict_options` is used by default.
+- `jsonschema` options are comptime and `strict_options` is used by default.
 - `instructor.zig` builds as a library and compiles examples during `zig build test` and `zig build examples`.
 - Primary API returns `T` directly through a session-owned arena.
 - Detailed API exposes response text, raw response, and per-call usage.

@@ -16,11 +16,15 @@ pub const Hooks = types.Hooks;
 pub const CreateResult = types.CreateResult;
 
 pub const Options = options.Options;
+pub const FieldNaming = options.FieldNaming;
+pub const RootWrapper = options.RootWrapper;
+pub const ObjectRootWrapper = options.ObjectRootWrapper;
 pub const openai_schema_options = options.openai_schema_options;
 
 pub const Error = create.Error;
 pub const createWithArena = create.createWithArena;
 pub const createDetailedWithArena = create.createDetailedWithArena;
+pub const schemaAlloc = create.schemaAlloc;
 pub const diagnostic = diagnostics.diagnostic;
 pub const printError = diagnostics.printError;
 pub const writeError = diagnostics.writeError;
@@ -100,6 +104,43 @@ test "session createDetailed exposes raw response and per-call usage" {
     try std.testing.expectEqualStrings(result.text, s.last_text.?);
     try std.testing.expectEqualStrings(result.raw_response, s.last_raw_response.?);
     try std.testing.expect(std.mem.indexOf(u8, result.raw_response, "mock response 0") != null);
+}
+
+test "schemaAlloc uses jsonschema tool descriptor" {
+    const std = @import("std");
+
+    const Person = struct {
+        name: []const u8,
+
+        pub const jsonschema = .{
+            .name = "Person",
+            .description = "Extract person.",
+        };
+    };
+
+    var schema = try schemaAlloc(Person, std.testing.allocator, openai_schema_options);
+    defer schema.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("Person", schema.name);
+    try std.testing.expectEqualStrings("Extract person.", schema.description.?);
+    try std.testing.expect(std.mem.indexOf(u8, schema.schema_json, "\"type\":\"object\"") != null);
+}
+
+test "schema options expose field naming" {
+    const std = @import("std");
+
+    const User = struct {
+        first_name: []const u8,
+    };
+
+    var schema = try schemaAlloc(User, std.testing.allocator, comptime blk: {
+        var opts = openai_schema_options;
+        opts.field_naming = .camelCase;
+        break :blk opts;
+    });
+    defer schema.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, schema.schema_json, "firstName") != null);
 }
 
 test "explicit object wrapper supports root arrays" {

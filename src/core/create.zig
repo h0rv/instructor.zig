@@ -23,15 +23,8 @@ pub fn createWithArena(
     var req = request;
     defer maybeDeinitRequest(provider, temp_allocator, &req);
 
-    const schema_json = try jsonschema.stringifyAlloc(T, temp_allocator, options.schema_options);
-    defer temp_allocator.free(schema_json);
-
-    const schema: types.StructuredSchema = .{
-        .name = comptime jsonschema.schemaName(T, options.schema_options),
-        .description = comptime jsonschema.schemaDescription(T),
-        .schema_json = schema_json,
-        .strict = true,
-    };
+    var schema = try schemaAlloc(T, temp_allocator, options.schema_options);
+    defer schema.deinit(temp_allocator);
 
     var attempt: usize = 0;
     while (attempt <= options.max_retries) : (attempt += 1) {
@@ -79,15 +72,8 @@ pub fn createDetailedWithArena(
     var req = request;
     defer maybeDeinitRequest(provider, temp_allocator, &req);
 
-    const schema_json = try jsonschema.stringifyAlloc(T, temp_allocator, options.schema_options);
-    defer temp_allocator.free(schema_json);
-
-    const schema: types.StructuredSchema = .{
-        .name = comptime jsonschema.schemaName(T, options.schema_options),
-        .description = comptime jsonschema.schemaDescription(T),
-        .schema_json = schema_json,
-        .strict = true,
-    };
+    var schema = try schemaAlloc(T, temp_allocator, options.schema_options);
+    defer schema.deinit(temp_allocator);
 
     emit(hooks, .request_start, .{ .schema_name = schema.name });
 
@@ -170,6 +156,21 @@ pub fn createDetailedWithArena(
     }
 
     return Error.MaxRetriesExceeded;
+}
+
+pub fn schemaAlloc(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    comptime schema_options: jsonschema.Options,
+) !types.StructuredSchema {
+    var tool = try jsonschema.toolSchemaAlloc(T, allocator, schema_options);
+    errdefer tool.deinit(allocator);
+    return .{
+        .name = tool.name,
+        .description = tool.description,
+        .schema_json = tool.schema_json,
+        .strict = true,
+    };
 }
 
 fn emit(hooks: ?types.Hooks, event: types.HookEvent, info: types.HookInfo) void {

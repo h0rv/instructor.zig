@@ -13,10 +13,14 @@ pub const Hooks = core.Hooks;
 pub const CreateResult = core.CreateResult;
 
 pub const Options = core.Options;
+pub const FieldNaming = core.FieldNaming;
+pub const RootWrapper = core.RootWrapper;
+pub const ObjectRootWrapper = core.ObjectRootWrapper;
 pub const Error = core.Error;
 pub const Session = core.Session;
 pub const createWithArena = core.createWithArena;
 pub const createDetailedWithArena = core.createDetailedWithArena;
+pub const schemaAlloc = core.schemaAlloc;
 pub const diagnostic = core.diagnostic;
 pub const printError = core.printError;
 pub const writeError = core.writeError;

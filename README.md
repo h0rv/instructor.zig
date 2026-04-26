@@ -125,9 +125,31 @@ pub fn CreateResult(comptime T: type) type {
 pub const Options = struct {
     mode: Mode = .json_schema,
     max_retries: u8 = 3,
-    schema_options: jsonschema.Options = jsonschema.openai_strict_options,
+    schema_options: jsonschema.Options = jsonschema.strict_options,
     parse_options: std.json.ParseOptions = .{ .allocate = .alloc_always },
 };
+```
+
+## Schema options
+
+`instructor.zig` uses `jsonschema.strict_options` by default. Pass comptime `schema_options` to use newer `jsonschema.zig` features such as field naming:
+
+```zig
+const user = try session.create(User, req, .{
+    .schema_options = comptime blk: {
+        var opts = instructor.openai_schema_options;
+        opts.field_naming = .camelCase;
+        break :blk opts;
+    },
+});
+```
+
+You can inspect the schema sent to providers:
+
+```zig
+var schema = try instructor.schemaAlloc(User, gpa, instructor.openai_schema_options);
+defer schema.deinit(gpa);
+std.debug.print("{s}\n", .{schema.schema_json});
 ```
 
 ## Object roots

@@ -26,6 +26,11 @@ pub const StructuredSchema = struct {
     description: ?[]const u8 = null,
     schema_json: []const u8,
     strict: bool = true,
+
+    pub fn deinit(self: *StructuredSchema, allocator: std.mem.Allocator) void {
+        allocator.free(self.schema_json);
+        self.* = .{ .name = "", .schema_json = &.{} };
+    }
 };
 
 pub const RetryMessage = struct {

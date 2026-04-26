@@ -282,7 +282,7 @@ This mirrors Zig's explicit-type style and avoids dynamic wrapper/unwrapper stat
 pub const Options = struct {
     mode: Mode = .json_schema,
     max_retries: u8 = 3,
-    schema_options: jsonschema.Options = jsonschema.openai_strict_options,
+    schema_options: jsonschema.Options = jsonschema.strict_options,
     parse_options: std.json.ParseOptions = .{
         .allocate = .alloc_always,
     },
@@ -601,7 +601,7 @@ session.createDetailed(T, request, options)
 
 createDetailedWithArena(T, temp_allocator, result_allocator, provider, request, usage_out, hooks, options)
   req = mutable copy(request)
-  schema_json = jsonschema.stringifyAlloc(T, temp_allocator, options.schema_options)
+  schema = jsonschema.toolSchemaAlloc(T, temp_allocator, options.schema_options)
   schema = { name, description, schema_json, strict = true }
   emit request_start
 

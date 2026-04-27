@@ -289,12 +289,12 @@ fn buildResponsesRequest(
     };
 
     switch (mode) {
-        .json_schema => body.text = .{ .format = responsesFormat(schema, schema_value) },
-        .json_object => body.text = .{ .format = .{ .responseformatjsonobject = .{ .type = "json_object" } } },
+        .json_schema => body.text = .{ .format = try responsesFormat(allocator, schema, schema_value) },
+        .json_object => body.text = .{ .format = .{ .response_format_json_object = .{ .type = "json_object" } } },
         .responses_tool_call, .responses_tool_call_required => {
             body.tools = try responsesToolSlice(allocator, schema, schema_value);
             if (mode == .responses_tool_call_required) {
-                body.tool_choice = .{ .toolchoicefunction = .{ .type = "function", .name = schema.name } };
+                body.tool_choice = .{ .tool_choice_function = .{ .type = "function", .name = schema.name } };
             }
         },
         .tool_call, .tool_call_required => unreachable,
@@ -318,12 +318,15 @@ fn buildChatCompletionsRequest(
     };
 
     switch (mode) {
-        .json_schema => body.response_format = try chatResponseFormatValue(allocator, schema, schema_value),
-        .json_object => body.response_format = try jsonObjectFormatValue(allocator),
+        .json_schema => body.response_format = try chatResponseFormat(allocator, schema, schema_value),
+        .json_object => body.response_format = .{ .json_object = .{ .type = "json_object" } },
         .tool_call, .tool_call_required => {
             body.tools = try chatToolSlice(allocator, schema, schema_value);
             if (mode == .tool_call_required) {
-                body.tool_choice = .{ .raw = try chatToolChoiceValue(allocator, schema.name) };
+                body.tool_choice = .{ .chat_completion_named_tool_choice = .{
+                    .type = "function",
+                    .function = .{ .name = schema.name },
+                } };
             }
         },
         .responses_tool_call, .responses_tool_call_required => unreachable,
@@ -463,12 +466,12 @@ fn getU64(value: ?std.json.Value) ?u64 {
 fn inputItems(allocator: std.mem.Allocator, messages: []const Client.Message) ![]const openai.InputItem {
     const result = try allocator.alloc(openai.InputItem, messages.len);
     for (messages, result) |message, *out| {
-        out.* = .{ .easyinputmessage = .{
+        out.* = .{ .easy_input_message = .{
             .role = roleString(message.role),
             .content = if (message.images.len == 0)
-                .{ .string = message.content }
+                .{ .text = message.content }
             else
-                try responsesContentParts(allocator, message),
+                .{ .parts = try responsesContentParts(allocator, message) },
         } };
     }
     return result;
@@ -488,27 +491,26 @@ fn messagesSlice(allocator: std.mem.Allocator, messages: []const Client.Message)
     return result;
 }
 
-fn responsesContentParts(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
-    var parts = std.json.Array.init(allocator);
+fn responsesContentParts(allocator: std.mem.Allocator, message: Client.Message) ![]const openai.InputContent {
+    const text_count: usize = if (message.content.len == 0) 0 else 1;
+    const result = try allocator.alloc(openai.InputContent, text_count + message.images.len);
+    var index: usize = 0;
 
     if (message.content.len != 0) {
-        var text = std.json.ObjectMap.empty;
-        try text.put(allocator, "type", .{ .string = "input_text" });
-        try text.put(allocator, "text", .{ .string = message.content });
-        try parts.append(.{ .object = text });
+        result[index] = .{ .input_text = .{ .type = "input_text", .text = message.content } };
+        index += 1;
     }
 
     for (message.images) |image| {
-        var part = std.json.ObjectMap.empty;
-        try part.put(allocator, "type", .{ .string = "input_image" });
-        try part.put(allocator, "image_url", .{ .string = image.url });
-        if (image.detail) |detail| {
-            try part.put(allocator, "detail", .{ .string = detail });
-        }
-        try parts.append(.{ .object = part });
+        result[index] = .{ .input_image = .{
+            .type = "input_image",
+            .image_url = image.url,
+            .detail = image.detail orelse "auto",
+        } };
+        index += 1;
     }
 
-    return .{ .array = parts };
+    return result;
 }
 
 fn chatContentParts(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
@@ -538,74 +540,46 @@ fn chatContentParts(allocator: std.mem.Allocator, message: Client.Message) !std.
 }
 
 fn responsesFormat(
+    allocator: std.mem.Allocator,
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
-) openai.TextResponseFormatConfiguration {
-    return .{ .textresponseformatjsonschema = .{
+) !openai.TextResponseFormatConfiguration {
+    return .{ .text_response_format_json_schema = .{
         .type = "json_schema",
         .name = schema.name,
         .description = schema.description,
         .strict = @as(?bool, schema.strict),
-        .schema = schema_value,
+        .schema = try responseSchemaValue(allocator, schema_value),
     } };
 }
 
-fn chatResponseFormatValue(
+fn chatResponseFormat(
     allocator: std.mem.Allocator,
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
-) !std.json.Value {
-    var json_schema = std.json.ObjectMap.empty;
-    try json_schema.put(allocator, "name", .{ .string = schema.name });
-    if (schema.description) |description| {
-        try json_schema.put(allocator, "description", .{ .string = description });
-    }
-    try json_schema.put(allocator, "strict", .{ .bool = schema.strict });
-    try json_schema.put(allocator, "schema", schema_value);
-
-    var object = std.json.ObjectMap.empty;
-    try object.put(allocator, "type", .{ .string = "json_schema" });
-    try object.put(allocator, "json_schema", .{ .object = json_schema });
-    return .{ .object = object };
-}
-
-fn jsonObjectFormatValue(allocator: std.mem.Allocator) !std.json.Value {
-    var object = std.json.ObjectMap.empty;
-    try object.put(allocator, "type", .{ .string = "json_object" });
-    return .{ .object = object };
+) !openai.CreateChatCompletionRequestResponseFormat {
+    return .{ .json_schema = .{
+        .type = "json_schema",
+        .json_schema = .{
+            .name = schema.name,
+            .description = schema.description,
+            .strict = @as(?bool, schema.strict),
+            .schema = try responseSchemaValue(allocator, schema_value),
+        },
+    } };
 }
 
 fn chatToolSlice(
     allocator: std.mem.Allocator,
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
-) ![]const std.json.Value {
-    const tools = try allocator.alloc(std.json.Value, 1);
-    tools[0] = try chatToolValue(allocator, schema, schema_value);
+) ![]const openai.CreateChatCompletionRequestToolsItem {
+    const tools = try allocator.alloc(openai.CreateChatCompletionRequestToolsItem, 1);
+    tools[0] = .{ .chat_completion_tool = .{
+        .type = "function",
+        .function = try functionObject(allocator, schema, schema_value),
+    } };
     return tools;
-}
-
-fn chatToolValue(
-    allocator: std.mem.Allocator,
-    schema: types.StructuredSchema,
-    schema_value: std.json.Value,
-) !std.json.Value {
-    const function = try functionObject(allocator, schema, schema_value);
-
-    var object = std.json.ObjectMap.empty;
-    try object.put(allocator, "type", .{ .string = "function" });
-    try object.put(allocator, "function", .{ .object = function });
-    return .{ .object = object };
-}
-
-fn chatToolChoiceValue(allocator: std.mem.Allocator, name: []const u8) !std.json.Value {
-    var function = std.json.ObjectMap.empty;
-    try function.put(allocator, "name", .{ .string = name });
-
-    var object = std.json.ObjectMap.empty;
-    try object.put(allocator, "type", .{ .string = "function" });
-    try object.put(allocator, "function", .{ .object = function });
-    return .{ .object = object };
 }
 
 fn responsesToolSlice(
@@ -614,11 +588,11 @@ fn responsesToolSlice(
     schema_value: std.json.Value,
 ) !openai.ToolsArray {
     const tools = try allocator.alloc(openai.Tool, 1);
-    tools[0] = .{ .functiontool = .{
+    tools[0] = .{ .function = .{
         .type = "function",
         .name = schema.name,
         .description = schema.description,
-        .parameters = schema_value,
+        .parameters = try functionParametersValue(allocator, schema_value),
         .strict = schema.strict,
     } };
     return tools;
@@ -628,19 +602,27 @@ fn functionObject(
     allocator: std.mem.Allocator,
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
-) !std.json.ObjectMap {
-    var function = std.json.ObjectMap.empty;
-    try function.put(allocator, "name", .{ .string = schema.name });
-    if (schema.description) |description| {
-        try function.put(allocator, "description", .{ .string = description });
-    }
-    try function.put(allocator, "parameters", schema_value);
-    try function.put(allocator, "strict", .{ .bool = schema.strict });
-    return function;
+) !openai.FunctionObject {
+    return .{
+        .name = schema.name,
+        .description = schema.description,
+        .parameters = try functionParametersValue(allocator, schema_value),
+        .strict = schema.strict,
+    };
 }
 
-fn optionalU32(value: ?u32) ?std.json.Value {
-    return if (value) |v| .{ .integer = @intCast(v) } else null;
+fn responseSchemaValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !openai.ResponseFormatJsonSchemaSchema {
+    return openai.ResponseFormatJsonSchemaSchema.jsonParseFromValue(allocator, value, .{});
+}
+
+fn functionParametersValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+) !openai.FunctionParameters {
+    return openai.FunctionParameters.jsonParseFromValue(allocator, value, .{});
 }
 
 fn roleString(role: Client.Role) []const u8 {

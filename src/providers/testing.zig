@@ -11,6 +11,8 @@ pub const Provider = struct {
     calls: usize = 0,
     retry_count: usize = 0,
     last_schema_name: ?[]const u8 = null,
+    saw_parse_retry: bool = false,
+    saw_validation_retry: bool = false,
 
     pub fn completeStructured(
         self: *Provider,
@@ -53,7 +55,12 @@ pub const Provider = struct {
         retry: types.RetryMessage,
     ) !void {
         _ = allocator;
-        _ = retry;
+        if (std.mem.indexOf(u8, retry.error_message, "JSON parsing failed") != null) {
+            self.saw_parse_retry = true;
+        }
+        if (std.mem.indexOf(u8, retry.error_message, "failed schema validation") != null) {
+            self.saw_validation_retry = true;
+        }
         self.retry_count += 1;
         request.retry_count += 1;
     }

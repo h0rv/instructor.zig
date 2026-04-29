@@ -36,22 +36,15 @@ pub fn createWithArena(
         var parse_check_arena = std.heap.ArenaAllocator.init(temp_allocator);
         defer parse_check_arena.deinit();
 
-        _ = std.json.parseFromSliceLeaky(T, parse_check_arena.allocator(), completion.text, options.parse_options) catch |parse_err| {
+        if (try checkParseAndValidate(T, parse_check_arena.allocator(), completion.text, options)) |failure| {
             if (attempt == options.max_retries) return Error.MaxRetriesExceeded;
-
-            const error_message = try std.fmt.allocPrint(
-                temp_allocator,
-                "JSON parsing failed: {s}. Return only valid JSON matching the schema.",
-                .{@errorName(parse_err)},
-            );
-            defer temp_allocator.free(error_message);
 
             try provider.appendRetry(temp_allocator, &req, .{
                 .failed_response = completion.text,
-                .error_message = error_message,
+                .error_message = failure.message,
             });
             continue;
-        };
+        }
 
         return std.json.parseFromSliceLeaky(T, result_allocator, completion.text, options.parse_options);
     }
@@ -97,40 +90,38 @@ pub fn createDetailedWithArena(
         var parse_check_arena = std.heap.ArenaAllocator.init(temp_allocator);
         defer parse_check_arena.deinit();
 
-        _ = std.json.parseFromSliceLeaky(T, parse_check_arena.allocator(), completion.text, options.parse_options) catch |parse_err| {
-            const error_name = @errorName(parse_err);
-            emit(hooks, .parse_error, .{
+        if (try checkParseAndValidate(T, parse_check_arena.allocator(), completion.text, options)) |failure| {
+            const event: types.HookEvent = switch (failure.kind) {
+                .parse => .parse_error,
+                .validation => .validation_error,
+            };
+            emit(hooks, event, .{
                 .attempt = attempt,
                 .schema_name = schema.name,
                 .response_text = completion.text,
                 .raw_response = completion.raw_response,
-                .error_name = error_name,
+                .error_name = failure.error_name,
+                .validation_errors = failure.validation_errors,
                 .usage = call_usage,
             });
 
             if (attempt == options.max_retries) return Error.MaxRetriesExceeded;
 
-            const error_message = try std.fmt.allocPrint(
-                temp_allocator,
-                "JSON parsing failed: {s}. Return only valid JSON matching the schema.",
-                .{error_name},
-            );
-            defer temp_allocator.free(error_message);
-
             try provider.appendRetry(temp_allocator, &req, .{
                 .failed_response = completion.text,
-                .error_message = error_message,
+                .error_message = failure.message,
             });
             emit(hooks, .retry, .{
                 .attempt = attempt,
                 .schema_name = schema.name,
                 .response_text = completion.text,
                 .raw_response = completion.raw_response,
-                .error_name = error_name,
+                .error_name = failure.error_name,
+                .validation_errors = failure.validation_errors,
                 .usage = call_usage,
             });
             continue;
-        };
+        }
 
         const text = try result_allocator.dupe(u8, completion.text);
         errdefer result_allocator.free(text);
@@ -170,6 +161,59 @@ pub fn schemaAlloc(
         .description = tool.description,
         .schema_json = tool.schema_json,
         .strict = true,
+    };
+}
+
+const FailureKind = enum { parse, validation };
+
+const CheckFailure = struct {
+    kind: FailureKind,
+    error_name: []const u8,
+    message: []const u8,
+    validation_errors: ?[]const u8 = null,
+};
+
+fn checkParseAndValidate(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    comptime options: options_mod.Options,
+) !?CheckFailure {
+    const value = std.json.parseFromSliceLeaky(T, allocator, text, options.parse_options) catch |parse_err| {
+        const error_name = @errorName(parse_err);
+        return .{
+            .kind = .parse,
+            .error_name = error_name,
+            .message = try std.fmt.allocPrint(
+                allocator,
+                "JSON parsing failed: {s}. Return only valid JSON matching the schema.",
+                .{error_name},
+            ),
+        };
+    };
+
+    if (!options.validate) return null;
+
+    var validation_output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer validation_output.deinit();
+
+    if (try jsonschema.validateValue(T, value, &validation_output.writer, options.schema_options)) {
+        validation_output.deinit();
+        return null;
+    }
+
+    const validation_errors = try validation_output.toOwnedSlice();
+    errdefer allocator.free(validation_errors);
+
+    return .{
+        .kind = .validation,
+        .error_name = "ValidationError",
+        .validation_errors = validation_errors,
+        .message = try std.fmt.allocPrint(
+            allocator,
+            "JSON parsed but failed schema validation:\n{s}Return JSON matching the schema.",
+            .{validation_errors},
+        ),
     };
 }
 

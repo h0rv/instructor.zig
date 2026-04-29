@@ -5,12 +5,12 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .jsonschema = .{
-            .url = "git+https://github.com/h0rv/jsonschema.zig.git#cbb68c443c296e1187380ed763a41e8d17365976",
-            .hash = "jsonschema-0.0.0-hZhxTktcAgDAfsGn-jEtcPozX2DK1QIsdPN1x7daH4JR",
+            .url = "git+https://github.com/h0rv/jsonschema.zig.git#2f180097066b493845242acc85ab48069a46cd3d",
+            .hash = "jsonschema-0.0.0-hZhxTrAAAwC5_iz6-cnj4md10XU9MPAGLqxKZcjofTKx",
         },
         .openai = .{
-            .url = "git+https://github.com/h0rv/openai.zig.git#397b956311679c2891cbfd7d166f5946b130aadb",
-            .hash = "openai-0.0.0-ZlElDLpBEQAEfOFcruE8jHraDcVNQ0i6Bpq4LWvdaHSn",
+            .url = "git+https://github.com/h0rv/openai.zig.git#59f780c5e4d44870c69088b577877ebcefa37fda",
+            .hash = "openai-0.0.0-ZlElDGRAEQBZOrXGtuh-5By3rUC09sV3cUdzAVwEarLB",
         },
     },
     .paths = .{

@@ -81,8 +81,68 @@ test "session create retries parse errors" {
 
     try std.testing.expectEqual(@as(usize, 2), provider.calls);
     try std.testing.expectEqual(@as(usize, 1), provider.retry_count);
+    try std.testing.expect(provider.saw_parse_retry);
     try std.testing.expectEqualStrings("Grace", person.name);
     try std.testing.expectEqual(@as(u64, 6), s.usage.total_tokens);
+}
+
+test "session create retries validation errors by default" {
+    const std = @import("std");
+    const testing = @import("../providers/testing.zig");
+
+    const User = struct {
+        name: []const u8,
+
+        pub const jsonschema = .{
+            .name = "User",
+            .fields = .{
+                .name = .{ .minLength = 1 },
+            },
+        };
+    };
+
+    var provider: testing.Provider = .{
+        .responses = &.{ "{\"name\":\"\"}", "{\"name\":\"Ada\"}" },
+    };
+
+    var s = session(std.testing.allocator, &provider);
+    defer s.deinit();
+
+    const user = try s.create(User, testing.Request{}, .{});
+
+    try std.testing.expectEqual(@as(usize, 2), provider.calls);
+    try std.testing.expectEqual(@as(usize, 1), provider.retry_count);
+    try std.testing.expect(provider.saw_validation_retry);
+    try std.testing.expectEqualStrings("Ada", user.name);
+}
+
+test "validation can be disabled" {
+    const std = @import("std");
+    const testing = @import("../providers/testing.zig");
+
+    const User = struct {
+        name: []const u8,
+
+        pub const jsonschema = .{
+            .name = "User",
+            .fields = .{
+                .name = .{ .minLength = 1 },
+            },
+        };
+    };
+
+    var provider: testing.Provider = .{
+        .responses = &.{"{\"name\":\"\"}"},
+    };
+
+    var s = session(std.testing.allocator, &provider);
+    defer s.deinit();
+
+    const user = try s.create(User, testing.Request{}, .{ .validate = false });
+
+    try std.testing.expectEqual(@as(usize, 1), provider.calls);
+    try std.testing.expectEqual(@as(usize, 0), provider.retry_count);
+    try std.testing.expectEqualStrings("", user.name);
 }
 
 test "session createDetailed exposes raw response and per-call usage" {
@@ -175,6 +235,61 @@ test "explicit object wrapper supports root arrays" {
     try std.testing.expectEqual(@as(usize, 2), result.items.len);
     try std.testing.expectEqualStrings("ship docs", result.items[0].task);
     try std.testing.expectEqualStrings("write tests", result.items[1].task);
+}
+
+test "session hooks report validation retry flow" {
+    const std = @import("std");
+    const testing = @import("../providers/testing.zig");
+
+    const User = struct {
+        name: []const u8,
+
+        pub const jsonschema = .{
+            .name = "User",
+            .fields = .{
+                .name = .{ .minLength = 1 },
+            },
+        };
+    };
+
+    const HookState = struct {
+        events: [8]HookEvent = undefined,
+        len: usize = 0,
+        validation_error_name: ?[]const u8 = null,
+        saw_validation_errors: bool = false,
+
+        fn onEvent(ctx: ?*anyopaque, event: HookEvent, info: HookInfo) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx.?));
+            self.events[self.len] = event;
+            self.len += 1;
+            if (event == .validation_error) {
+                self.validation_error_name = info.error_name;
+                self.saw_validation_errors = info.validation_errors != null;
+            }
+        }
+    };
+
+    var state: HookState = .{};
+    var provider: testing.Provider = .{
+        .responses = &.{ "{\"name\":\"\"}", "{\"name\":\"Grace\"}" },
+    };
+
+    var s = session(std.testing.allocator, &provider);
+    defer s.deinit();
+    s.setHooks(.{ .ctx = &state, .on_event = HookState.onEvent });
+
+    const user = try s.create(User, testing.Request{}, .{});
+
+    try std.testing.expectEqualStrings("Grace", user.name);
+    try std.testing.expectEqual(@as(usize, 6), state.len);
+    try std.testing.expectEqual(HookEvent.request_start, state.events[0]);
+    try std.testing.expectEqual(HookEvent.response_received, state.events[1]);
+    try std.testing.expectEqual(HookEvent.validation_error, state.events[2]);
+    try std.testing.expectEqual(HookEvent.retry, state.events[3]);
+    try std.testing.expectEqual(HookEvent.response_received, state.events[4]);
+    try std.testing.expectEqual(HookEvent.completion_done, state.events[5]);
+    try std.testing.expectEqualStrings("ValidationError", state.validation_error_name.?);
+    try std.testing.expect(state.saw_validation_errors);
 }
 
 test "session hooks report retry flow" {

@@ -9,7 +9,7 @@ Target Zig version: `0.16.0`.
 - `instructor.zig` builds as a library and compiles examples during `zig build test` and `zig build examples`.
 - Primary API returns `T` directly through a session-owned arena.
 - Detailed API exposes response text, raw response, and per-call usage.
-- Session hooks cover request, response, parse error, retry, and completion events.
+- Session hooks cover request, response, parse error, validation error, retry, and completion events.
 - Native Zig tagged-union schemas are available through the updated `jsonschema.zig` dependency.
 - Provider object-root requirements are handled with explicit Zig wrapper structs.
 - OpenAI-compatible provider uses `openai.zig` for HTTP/client plumbing and supports both Responses and Chat Completions endpoints.
@@ -19,9 +19,7 @@ Target Zig version: `0.16.0`.
 
 ## Deferred
 
-- JSON Schema validation: keep out of core; integrate `validate.zig` or another validator later.
 - Streaming partial-object parsing.
-- Multimodal request parts.
 - Rich error result type; current provider exposes diagnostics separately.
 
 ## Provider contract reminders

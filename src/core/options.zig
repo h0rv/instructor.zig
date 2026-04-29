@@ -11,6 +11,7 @@ pub const openai_schema_options = jsonschema.strict_options;
 pub const Options = struct {
     mode: types.Mode = .json_schema,
     max_retries: u8 = 3,
+    validate: bool = true,
     schema_options: jsonschema.Options = openai_schema_options,
     parse_options: std.json.ParseOptions = .{ .allocate = .alloc_always },
 };

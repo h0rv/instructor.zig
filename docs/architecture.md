@@ -31,7 +31,8 @@ Core does:
 - build schema for `T`
 - call provider
 - parse JSON into caller/session arena
-- retry parse failures
+- validate parsed values with `jsonschema.validateValue`
+- retry parse or validation failures
 - accumulate usage
 - emit hooks
 - retain per-call text/raw response for detailed results
@@ -39,7 +40,7 @@ Core does:
 Core does not:
 
 - know provider request internals
-- validate JSON Schema constraints
+- implement full JSON Schema validation itself
 - own HTTP details
 - store provider-specific data
 

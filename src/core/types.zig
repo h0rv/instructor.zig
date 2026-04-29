@@ -51,6 +51,7 @@ pub const HookEvent = enum {
     request_start,
     response_received,
     parse_error,
+    validation_error,
     retry,
     completion_done,
 };
@@ -61,6 +62,7 @@ pub const HookInfo = struct {
     response_text: ?[]const u8 = null,
     raw_response: ?[]const u8 = null,
     error_name: ?[]const u8 = null,
+    validation_errors: ?[]const u8 = null,
     usage: Usage = .{},
 };
 

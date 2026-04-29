@@ -2,7 +2,7 @@
 
 Target Zig version: `0.16.0` stable APIs.
 
-Status: v0 design. Validation is explicitly out of scope for v0. `validate.zig` or a future JSON Schema validation library can plug in later.
+Status: v0 design. Parsed values are validated by default with `jsonschema.validateValue` for supported metadata.
 
 ## Core design
 
@@ -21,14 +21,14 @@ This matches Zig style and `std.Io`: caller controls I/O, allocation, and lifeti
 - Generate JSON Schema from comptime Zig type.
 - Send schema to provider through adapter.
 - Parse provider JSON text into Zig type with `std.json`.
-- Retry on parse errors by appending provider-specific error feedback.
+- Retry on parse or validation errors by appending provider-specific error feedback.
 - Return `T` directly for ergonomic code.
 - Free all result memory through `Session.deinit()`.
-- Keep validation outside core.
+- Validate parsed values against supported `jsonschema.zig` metadata by default.
 
 ## Non-goals for v0
 
-- JSON Schema validation.
+- Full JSON Schema spec validation.
 - `T.validate()` hooks.
 - Streaming.
 - Union extraction.
@@ -282,6 +282,7 @@ This mirrors Zig's explicit-type style and avoids dynamic wrapper/unwrapper stat
 pub const Options = struct {
     mode: Mode = .json_schema,
     max_retries: u8 = 3,
+    validate: bool = true,
     schema_options: jsonschema.Options = jsonschema.strict_options,
     parse_options: std.json.ParseOptions = .{
         .allocate = .alloc_always,
@@ -315,30 +316,21 @@ Provider adapters may reject unsupported endpoint/mode combinations with `error.
 
 ## Validation policy
 
-V0 does not validate schema constraints after parse.
+After a provider response parses into `T`, `instructor.zig` validates the value with `jsonschema.validateValue` by default. Validation failures are retried just like parse failures, but the retry message includes concrete validation diagnostics.
 
-Reason: validation deserves separate library and API. `instructor.zig` should orchestrate schema, provider calls, parsing, and retry, not become validator.
+Disable validation per call when needed:
+
+```zig
+const value = try session.create(T, req, .{ .validate = false });
+```
 
 Layering:
 
-- `jsonschema.zig`: emit schemas only.
-- `validate.zig` or future lib: validate JSON/value against schema.
+- `jsonschema.zig`: emit schemas and validate parsed Zig values for supported metadata.
 - `openai.zig`: HTTP/API types and client.
-- `instructor.zig`: schema -> provider -> parse -> retry.
+- `instructor.zig`: schema -> provider -> parse -> validate -> retry.
 
-Future validation entry point may be separate:
-
-```zig
-pub fn createValidated(
-    comptime T: type,
-    session: anytype,
-    request: anytype,
-    validator: anytype,
-    comptime options: Options,
-) !T;
-```
-
-Validator contract can be decided later.
+Validation coverage follows `jsonschema.zig`; unsupported JSON Schema vocabulary remains provider-guidance-only.
 
 ## Usage
 
@@ -379,6 +371,7 @@ pub const HookEvent = enum {
     request_start,
     response_received,
     parse_error,
+    validation_error,
     retry,
     completion_done,
 };
@@ -389,6 +382,7 @@ pub const HookInfo = struct {
     response_text: ?[]const u8 = null,
     raw_response: ?[]const u8 = null,
     error_name: ?[]const u8 = null,
+    validation_errors: ?[]const u8 = null,
     usage: Usage = .{},
 };
 
@@ -611,19 +605,19 @@ createDetailedWithArena(T, temp_allocator, result_allocator, provider, request, 
     emit response_received
 
     parse_check = std.json.parseFromSliceLeaky(T, temp_attempt_arena, completion.text, options.parse_options)
-    if parse ok:
+    if parse ok and validation ok:
       copy completion.text/raw_response into result_allocator
       value = std.json.parseFromSliceLeaky(T, result_allocator, copied_text, options.parse_options)
       emit completion_done
       completion.deinit(temp_allocator)
       return .{ value, text, raw_response, usage }
 
-    emit parse_error
+    emit parse_error or validation_error
     completion.deinit(temp_allocator)
     if no attempts remain:
       return error.MaxRetriesExceeded
 
-    provider.appendRetry(temp_allocator, &req, .{ failed_response, parse_error_message })
+    provider.appendRetry(temp_allocator, &req, .{ failed_response, parse_or_validation_message })
     emit retry
 ```
 

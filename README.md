@@ -8,6 +8,20 @@ Targets Zig `0.16.0` stable APIs.
 
 Define a Zig struct, send its JSON Schema to an OpenAI-compatible provider, and get a typed value back. Memory for returned values is owned by a session arena.
 
+Built with:
+
+- [`jsonschema.zig`](https://github.com/h0rv/jsonschema.zig) for schema generation and value validation
+- [`openai.zig`](https://github.com/h0rv/openai.zig) for OpenAI-compatible HTTP and API types
+
+What it does:
+
+- Generate JSON Schema from Zig types
+- Call OpenAI Responses, Chat Completions, or OpenRouter-compatible APIs
+- Parse model output directly into `T`
+- Validate parsed values by default and retry with concrete errors
+- Support JSON Schema, JSON object, tool-call, and multimodal image modes
+- Keep result memory explicit with `Session` owned arenas
+
 ## Install
 
 Add the package from GitHub:
@@ -125,12 +139,21 @@ pub fn CreateResult(comptime T: type) type {
 pub const Options = struct {
     mode: Mode = .json_schema,
     max_retries: u8 = 3,
+    validate: bool = true,
     schema_options: jsonschema.Options = jsonschema.strict_options,
     parse_options: std.json.ParseOptions = .{ .allocate = .alloc_always },
 };
 ```
 
-## Schema options
+## Validation and schema options
+
+`instructor.zig` validates parsed values with `jsonschema.validateValue` by default. Parse or validation failures are retried with concrete error feedback until `max_retries` is exhausted.
+
+Migration note: if older code accepted parseable but constraint-invalid outputs, set `.validate = false` while tightening prompts/schemas:
+
+```zig
+const value = try session.create(T, req, .{ .validate = false });
+```
 
 `instructor.zig` uses `jsonschema.strict_options` by default. Pass comptime `schema_options` to use newer `jsonschema.zig` features such as field naming:
 
@@ -255,6 +278,7 @@ pub const HookEvent = enum {
     request_start,
     response_received,
     parse_error,
+    validation_error,
     retry,
     completion_done,
 };
@@ -385,21 +409,21 @@ mise run classify
 
 Included examples:
 
-- `examples/openrouter.zig` — basic structured extraction.
-- `examples/tool_planner.zig` — function-calling-style typed tool planning.
-- `examples/exact_citations.zig` — grounded answer with exact quotes.
-- `examples/action_items.zig` — meeting transcript to typed action items.
-- `examples/agent.zig` — typed agent loop using a native Zig tagged union.
-- `examples/native_tool_call.zig` — native Chat Completions tool-call mode.
-- `examples/multimodal_inspection.zig` — Responses API image input to typed visual inspection.
-- `examples/support_router.zig` — typed support-ticket routing.
-- `examples/invoice_extraction.zig` — nested invoice extraction with normalized cents.
-- `examples/llm_judge.zig` — typed eval/judge output.
-- `examples/pii_redaction.zig` — PII/secret detection and redaction plan.
-- `examples/query_understanding.zig` — natural-language query to search filters.
-- `examples/batch_extract.zig` — batch extraction with `session.reset()` lifetimes.
-- `examples/responses_tool_call.zig` — Responses API required tool-call mode.
-- `examples/classify_union.zig` — simple tagged-union classification.
+- `examples/openrouter.zig`: basic structured extraction.
+- `examples/tool_planner.zig`: function-calling-style typed tool planning.
+- `examples/exact_citations.zig`: grounded answer with exact quotes.
+- `examples/action_items.zig`: meeting transcript to typed action items.
+- `examples/agent.zig`: typed agent loop using a native Zig tagged union.
+- `examples/native_tool_call.zig`: native Chat Completions tool-call mode.
+- `examples/multimodal_inspection.zig`: Responses API image input to typed visual inspection.
+- `examples/support_router.zig`: typed support-ticket routing.
+- `examples/invoice_extraction.zig`: nested invoice extraction with normalized cents.
+- `examples/llm_judge.zig`: typed eval/judge output.
+- `examples/pii_redaction.zig`: PII/secret detection and redaction plan.
+- `examples/query_understanding.zig`: natural-language query to search filters.
+- `examples/batch_extract.zig`: batch extraction with `session.reset()` lifetimes.
+- `examples/responses_tool_call.zig`: Responses API required tool-call mode.
+- `examples/classify_union.zig`: simple tagged-union classification.
 
 ## Provider adapter contract
 
@@ -433,7 +457,7 @@ pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
 
 ## Scope
 
-This package orchestrates schema generation, provider calls, parsing, and parse-error retries. It does not validate JSON Schema constraints. Use `jsonschema.zig` for schema generation and a future validator package for value validation.
+This package orchestrates schema generation, provider calls, parsing, validation, and retry. `jsonschema.zig` emits schemas and validates parsed Zig values for supported metadata; provider adapters own transport and retry-message mutation.
 
 ## Build
 

@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .jsonschema = .{
-            .url = "git+https://github.com/h0rv/jsonschema.zig.git#2f180097066b493845242acc85ab48069a46cd3d",
-            .hash = "jsonschema-0.0.0-hZhxTrAAAwC5_iz6-cnj4md10XU9MPAGLqxKZcjofTKx",
+            .url = "git+https://github.com/h0rv/jsonschema.zig.git?ref=v0.1.0#f4516ca0c8e16a8cf6e0bc6ce17d1cc6d4468c94",
+            .hash = "jsonschema-0.1.0-hZhxTkcrBQAmEOWMI5eWmV-reXtevdwj-0ioYTrlPKTX",
         },
         .openai = .{
             .url = "git+https://github.com/h0rv/openai.zig.git#59f780c5e4d44870c69088b577877ebcefa37fda",

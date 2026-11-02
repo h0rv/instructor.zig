@@ -1,6 +1,6 @@
 # Integration notes
 
-Target Zig version: `0.16.0`.
+Target Zig version: `0.17.0`.
 
 ## Resolved for current scaffold
 

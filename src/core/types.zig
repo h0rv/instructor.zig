@@ -87,7 +87,7 @@ pub const Diagnostic = struct {
         try writer.print("provider: {s}\n", .{self.provider});
         if (self.status) |status| {
             try writer.print("status: {d} {s}\n", .{
-                @intFromEnum(status),
+                @backingInt(status),
                 status.phrase() orelse @tagName(status),
             });
         }

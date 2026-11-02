@@ -1,6 +1,6 @@
 # `instructor.zig` API spec
 
-Target Zig version: `0.16.0` stable APIs.
+Target Zig version: `0.17.0` stable APIs.
 
 Status: v0 design. Parsed values are validated by default with `jsonschema.validateValue` for supported metadata.
 
@@ -668,7 +668,7 @@ pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
 
 ## Current scope
 
-- Clean Zig `0.16.0` library build.
+- Clean Zig `0.17.0` library build.
 - Session-owned direct `T` API.
 - Detailed result API for raw response, response text, and per-call usage.
 - Hook API for request/response/parse/retry/completion events.

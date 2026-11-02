@@ -28,6 +28,8 @@ pub const openai_schema_options = core.openai_schema_options;
 pub const session = core.session;
 
 pub const OpenAI = providers.OpenAI;
+pub const Anthropic = providers.Anthropic;
+pub const anthropic_schema_options = providers.anthropic_schema_options;
 pub const testing_provider = providers.testing;
 pub const provider = providers;
 

@@ -1,16 +1,20 @@
 .{
     .name = .instructor,
-    .version = "0.0.0",
+    .version = "0.2.0",
     .fingerprint = 0x31fc43dd5961042b, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .jsonschema = .{
-            .url = "git+https://github.com/h0rv/jsonschema.zig.git?ref=v0.1.0#f4516ca0c8e16a8cf6e0bc6ce17d1cc6d4468c94",
-            .hash = "jsonschema-0.1.0-hZhxTkcrBQAmEOWMI5eWmV-reXtevdwj-0ioYTrlPKTX",
+            .url = "git+https://github.com/h0rv/jsonschema.zig.git#322a716ea8d434e709a8771aca72c74f08bfe4f2",
+            .hash = "jsonschema-0.3.0-hZhxTlxlDgCoxYfNpIHLgfTqunMmXVl5ipE4cxpsn6e9",
         },
         .openai = .{
-            .url = "git+https://github.com/h0rv/openai.zig.git#59f780c5e4d44870c69088b577877ebcefa37fda",
-            .hash = "openai-0.0.0-ZlElDGRAEQBZOrXGtuh-5By3rUC09sV3cUdzAVwEarLB",
+            .url = "git+https://github.com/h0rv/openai.zig.git#0606f50258596788341b8ddf21f6ee955c686b9e",
+            .hash = "openai-0.1.0-ZlElDIqgJgCyMHk_-mT2EJrlR3WCRwCdCu2lZxo2oUuH",
+        },
+        .anthropic = .{
+            .url = "git+https://github.com/h0rv/anthropic.zig.git#df98fa3d28b9f6f40225351e0d32e89f99dda051",
+            .hash = "anthropic-0.1.0-JxiKJRhDJwB1vfMCpugp1G-aNT_nQiCvtT5TPFMf3dVz",
         },
     },
     .paths = .{
@@ -18,8 +22,10 @@
         "build.zig.zon",
         "src",
         "examples",
+        "tools",
         "docs",
         "LICENSE",
         "README.md",
+        "CHANGELOG.md",
     },
 }

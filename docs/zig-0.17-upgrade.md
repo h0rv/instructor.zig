@@ -27,10 +27,10 @@ The older zig-ai fork is also migrated to version 0.1.0. agent.zig has no Zig pa
 
 ## Publication order
 
-1. The foundational releases are published: jsonschema v0.3.0 and zchema v0.2.0.
+1. Release jsonschema v0.3.0 and zchema v0.2.0 first.
 2. Keep the three SDKs pinned to the tested generator commit `ea81ba8fec5e037e3c649e0102a00ca2b927018f` and its verified package hash. Do not follow a moving branch.
 3. Merge and release OpenAI, Anthropic, and Open Responses v0.1.0 independently. Upstream generator approval is not a release prerequisite.
-4. Update Instructor's SDK pins to the final released commits. Its jsonschema dependency is pinned to the v0.3.0 release commit.
+4. Pin Instructor to those released SDK commits. This release pins OpenAI and Anthropic v0.1.0 and jsonschema v0.3.0 by tag, exact commit, and verified package hash.
 5. Run consumer tests and CI, then merge and release Instructor v0.2.0.
 6. After upstream PR #120 merges, switch the SDK generator pins to a verified upstream commit in a separate update. Keep the fork's main branch identical to upstream.
 

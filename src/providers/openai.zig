@@ -290,7 +290,7 @@ fn buildResponsesRequest(
 
     switch (mode) {
         .json_schema => body.text = .{ .format = try responsesFormat(allocator, schema, schema_value) },
-        .json_object => body.text = .{ .format = .{ .response_format_json_object = .{ .type = "json_object" } } },
+        .json_object => body.text = .{ .format = .{ .json_object = .{ .type = "json_object" } } },
         .responses_tool_call, .responses_tool_call_required => {
             body.tools = try responsesToolSlice(allocator, schema, schema_value);
             if (mode == .responses_tool_call_required) {
@@ -458,9 +458,18 @@ fn getU64(value: ?std.json.Value) ?u64 {
     const v = value orelse return null;
     return switch (v) {
         .integer => |int| if (int >= 0) @intCast(int) else null,
-        .float => |float| if (float >= 0) @intFromFloat(float) else null,
+        .float => |float| if (std.math.isFinite(float) and float >= 0 and float < 0x1p64 and @trunc(float) == float) @intFromFloat(float) else null,
         else => null,
     };
+}
+
+test "usage token counts reject fractional nonfinite and overflowing numbers" {
+    try std.testing.expectEqual(@as(?u64, 42), getU64(.{ .float = 42.0 }));
+    try std.testing.expectEqual(@as(?u64, null), getU64(.{ .float = 1.5 }));
+    try std.testing.expectEqual(@as(?u64, null), getU64(.{ .float = -1.0 }));
+    try std.testing.expectEqual(@as(?u64, null), getU64(.{ .float = 0x1p64 }));
+    try std.testing.expectEqual(@as(?u64, null), getU64(.{ .float = std.math.inf(f64) }));
+    try std.testing.expectEqual(@as(?u64, null), getU64(.{ .float = std.math.nan(f64) }));
 }
 
 fn inputItems(allocator: std.mem.Allocator, messages: []const Client.Message) ![]const openai.InputItem {
@@ -471,7 +480,7 @@ fn inputItems(allocator: std.mem.Allocator, messages: []const Client.Message) ![
             .content = if (message.images.len == 0)
                 .{ .text = message.content }
             else
-                .{ .parts = try responsesContentParts(allocator, message) },
+                .{ .input_message_content_list = try responsesContentParts(allocator, message) },
         } };
     }
     return result;
@@ -480,12 +489,35 @@ fn inputItems(allocator: std.mem.Allocator, messages: []const Client.Message) ![
 fn messagesSlice(allocator: std.mem.Allocator, messages: []const Client.Message) ![]const openai.ChatCompletionRequestMessage {
     const result = try allocator.alloc(openai.ChatCompletionRequestMessage, messages.len);
     for (messages, result) |message, *out| {
-        out.* = .{
-            .role = roleString(message.role),
-            .content = if (message.images.len == 0)
-                .{ .string = message.content }
-            else
-                try chatContentParts(allocator, message),
+        out.* = switch (message.role) {
+            .system => .{
+                .system = .{
+                    .role = "system",
+                    .content = if (message.images.len == 0)
+                        .{ .text = message.content }
+                    else
+                        // Compatible endpoints may allow images in system messages,
+                        // which the SDK's text-only system content cannot represent.
+                        .{ .raw = try rawChatContentParts(allocator, message) },
+                },
+            },
+            .user => .{ .user = .{
+                .role = "user",
+                .content = if (message.images.len == 0)
+                    .{ .text = message.content }
+                else
+                    .{ .array_of_content_parts = try chatContentParts(allocator, message) },
+            } },
+            .assistant => .{
+                .assistant = .{
+                    .role = "assistant",
+                    // The generated assistant content type is std.json.Value.
+                    .content = if (message.images.len == 0)
+                        .{ .string = message.content }
+                    else
+                        try rawChatContentParts(allocator, message),
+                },
+            },
         };
     }
     return result;
@@ -513,7 +545,25 @@ fn responsesContentParts(allocator: std.mem.Allocator, message: Client.Message) 
     return result;
 }
 
-fn chatContentParts(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
+fn chatContentParts(allocator: std.mem.Allocator, message: Client.Message) ![]const openai.ChatCompletionRequestUserMessageContentPart {
+    const text_count: usize = if (message.content.len == 0) 0 else 1;
+    const parts = try allocator.alloc(openai.ChatCompletionRequestUserMessageContentPart, text_count + message.images.len);
+    if (text_count != 0) {
+        parts[0] = .{ .chat_completion_request_message_content_part_text = .{
+            .type = "text",
+            .text = message.content,
+        } };
+    }
+    for (message.images, parts[text_count..]) |image, *part| {
+        part.* = .{ .chat_completion_request_message_content_part_image = .{
+            .type = "image_url",
+            .image_url = .{ .url = image.url, .detail = image.detail },
+        } };
+    }
+    return parts;
+}
+
+fn rawChatContentParts(allocator: std.mem.Allocator, message: Client.Message) !std.json.Value {
     var parts = std.json.Array.init(allocator);
 
     if (message.content.len != 0) {
@@ -544,7 +594,7 @@ fn responsesFormat(
     schema: types.StructuredSchema,
     schema_value: std.json.Value,
 ) !openai.TextResponseFormatConfiguration {
-    return .{ .text_response_format_json_schema = .{
+    return .{ .json_schema = .{
         .type = "json_schema",
         .name = schema.name,
         .description = schema.description,
@@ -658,6 +708,110 @@ test "build responses request supports multimodal input" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"input_text\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"input_image\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "https://example.com/image.jpg") != null);
+}
+
+test "chat messages preserve roles and typed multimodal content" {
+    const images = [_]Client.Image{
+        .{ .url = "https://example.com/image.jpg", .detail = "low" },
+        .{ .url = "data:image/png;base64,AAAA" },
+    };
+    const messages = [_]Client.Message{
+        .{ .role = .system, .content = "Extract the image details." },
+        .{ .role = .user, .content = "Describe these images.", .images = &images },
+        .{ .role = .assistant, .content = "{\"summary\":\"\"}" },
+        .{ .role = .user, .content = "Fix the empty summary." },
+        .{ .role = .user, .content = "", .images = &images },
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const converted = try messagesSlice(arena.allocator(), &messages);
+    try std.testing.expect(converted[0] == .system);
+    try std.testing.expect(converted[0].system.content == .text);
+    try std.testing.expect(converted[1] == .user);
+    const parts = converted[1].user.content.array_of_content_parts;
+    try std.testing.expectEqual(@as(usize, 3), parts.len);
+    try std.testing.expect(parts[0] == .chat_completion_request_message_content_part_text);
+    try std.testing.expect(parts[1] == .chat_completion_request_message_content_part_image);
+    try std.testing.expect(parts[2] == .chat_completion_request_message_content_part_image);
+    try std.testing.expect(converted[2] == .assistant);
+    try std.testing.expect(converted[3].user.content == .text);
+    try std.testing.expectEqual(@as(usize, 2), converted[4].user.content.array_of_content_parts.len);
+
+    const payload = try std.json.Stringify.valueAlloc(arena.allocator(), converted, .{ .emit_null_optional_fields = false });
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"role\":\"system\",\"content\":\"Extract the image details.\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"type\":\"image_url\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"url\":\"https://example.com/image.jpg\",\"detail\":\"low\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"url\":\"data:image/png;base64,AAAA\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "\"role\":\"assistant\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, payload, "array_of_content_parts") == null);
+}
+
+test "chat compatible endpoint content preserves system and assistant images" {
+    const images = [_]Client.Image{.{ .url = "https://example.com/image.jpg", .detail = "high" }};
+    const messages = [_]Client.Message{
+        .{ .role = .system, .content = "", .images = &images },
+        .{ .role = .assistant, .content = "An image.", .images = &images },
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const converted = try messagesSlice(arena.allocator(), &messages);
+    try std.testing.expect(converted[0] == .system);
+    try std.testing.expect(converted[0].system.content == .raw);
+    try std.testing.expect(converted[1] == .assistant);
+    const payload = try std.json.Stringify.valueAlloc(arena.allocator(), converted, .{ .emit_null_optional_fields = false });
+    const parsed = try std.json.parseFromSlice(std.json.Value, arena.allocator(), payload, .{});
+    defer parsed.deinit();
+    const system_parts = parsed.value.array.items[0].object.get("content").?.array.items;
+    const assistant_parts = parsed.value.array.items[1].object.get("content").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), system_parts.len);
+    try std.testing.expectEqualStrings("image_url", system_parts[0].object.get("type").?.string);
+    try std.testing.expectEqual(@as(usize, 2), assistant_parts.len);
+    try std.testing.expectEqualStrings("An image.", assistant_parts[0].object.get("text").?.string);
+    try std.testing.expectEqualStrings("high", assistant_parts[1].object.get("image_url").?.object.get("detail").?.string);
+}
+
+test "build requests supports every endpoint mode with typed formats and tools" {
+    const schema: types.StructuredSchema = .{
+        .name = "Person",
+        .schema_json = "{\"type\":\"object\"}",
+    };
+    const request: Client.Request = .{
+        .model = Client.default_model,
+        .messages = &.{.{ .role = .user, .content = "Ada is 42." }},
+    };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const parsed_schema = try parseSchemaValue(allocator, schema.schema_json);
+    defer parsed_schema.deinit();
+    inline for (.{ types.Mode.json_schema, .json_object, .tool_call, .tool_call_required, .responses_tool_call, .responses_tool_call_required }) |mode| {
+        if (modeSupported(.responses, mode)) {
+            const body = try buildResponsesRequest(allocator, request, schema, parsed_schema.value, mode);
+            switch (mode) {
+                .json_schema => try std.testing.expect(body.text.?.format.? == .json_schema),
+                .json_object => try std.testing.expect(body.text.?.format.? == .json_object),
+                .responses_tool_call, .responses_tool_call_required => {
+                    try std.testing.expect(body.tools.?[0] == .function);
+                    try std.testing.expectEqual(mode == .responses_tool_call_required, body.tool_choice != null);
+                },
+                else => unreachable,
+            }
+            _ = try std.json.Stringify.valueAlloc(allocator, body, .{ .emit_null_optional_fields = false });
+        }
+        if (modeSupported(.chat_completions, mode)) {
+            const body = try buildChatCompletionsRequest(allocator, request, schema, parsed_schema.value, mode);
+            switch (mode) {
+                .json_schema => try std.testing.expect(body.response_format.? == .json_schema),
+                .json_object => try std.testing.expect(body.response_format.? == .json_object),
+                .tool_call, .tool_call_required => {
+                    try std.testing.expect(body.tools.?[0] == .chat_completion_tool);
+                    try std.testing.expectEqual(mode == .tool_call_required, body.tool_choice != null);
+                },
+                else => unreachable,
+            }
+            _ = try std.json.Stringify.valueAlloc(allocator, body, .{ .emit_null_optional_fields = false });
+        }
+    }
 }
 
 test "build responses request writes raw schema" {

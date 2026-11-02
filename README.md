@@ -1,22 +1,23 @@
 # instructor.zig
 
-[![Zig Version](https://img.shields.io/badge/zig-0.16.0%2B-orange.svg)](https://ziglang.org/download/)
+[![Zig Version](https://img.shields.io/badge/zig-0.17.0-orange.svg)](https://ziglang.org/download/)
 
 Typed structured outputs for Zig.
 
-Targets Zig `0.16.0` stable APIs.
+Targets Zig `0.17.0` stable APIs.
 
-Define a Zig struct, send its JSON Schema to an OpenAI-compatible provider, and get a typed value back. Memory for returned values is owned by a session arena.
+Define a Zig struct, send its JSON Schema to an OpenAI-compatible provider or native Anthropic Messages, and get a typed value back. Memory for returned values is owned by a session arena.
 
 Built with:
 
 - [`jsonschema.zig`](https://github.com/h0rv/jsonschema.zig) for schema generation and value validation
 - [`openai.zig`](https://github.com/h0rv/openai.zig) for OpenAI-compatible HTTP and API types
+- [`anthropic.zig`](https://github.com/h0rv/anthropic.zig) for native Anthropic Messages
 
 What it does:
 
 - Generate JSON Schema from Zig types
-- Call OpenAI Responses, Chat Completions, or OpenRouter-compatible APIs
+- Call OpenAI Responses, Chat Completions, OpenRouter-compatible APIs, or native Anthropic Messages
 - Parse model output directly into `T`
 - Validate parsed values by default and retry with concrete errors
 - Support JSON Schema, JSON object, tool-call, and multimodal image modes
@@ -88,6 +89,34 @@ Robby: 24
 ```
 
 `person` is valid until `session.deinit()` or `session.reset()`.
+
+## Anthropic
+
+`Anthropic` uses the native `/messages` API through `anthropic.zig` with API version `2026-10-21`.
+
+```zig
+var client = instructor.Anthropic.init(.{
+    .allocator = init.gpa,
+    .io = init.io,
+    .api_key = init.environ_map.get("ANTHROPIC_API_KEY") orelse return error.MissingApiKey,
+    .max_tokens = 1024,
+});
+defer client.deinit();
+var session = instructor.session(init.gpa, &client);
+defer session.deinit();
+const person = try session.create(Person, instructor.Anthropic.Request{
+    .model = instructor.Anthropic.default_model,
+    .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
+}, .{ .schema_options = instructor.anthropic_schema_options });
+```
+
+The default mode sends `output_config.format` with a JSON Schema. `.tool_call` sends a strict native tool without forcing its use. `.tool_call_required` explicitly forces that named tool and depends on model support. `.json_object` and `.responses_*` modes return `UnsupportedMode`. Images return `UnsupportedImages`.
+
+System messages become top-level system text blocks. The required `max_tokens` defaults to 4096 in client config and can be overridden per request. There are no `temperature` or `top_p` fields on this provider's request.
+
+The remote schema omits unsupported numeric, string length, and array bounds, including bounds inferred by the default Instructor profile. Core still validates the original constraints locally and retries on failure. `anthropic_schema_options` disables inferred bounds and `$defs`. References, recursion, and unsupported schema constructs return explicit errors rather than changing their meaning. Refusals and token truncation are errors even with HTTP 200. Use `instructor.printError(err, &client)` to inspect the status and response body.
+
+Build the example without credentials with `zig build anthropic-example`. Run it with `ANTHROPIC_API_KEY` set using `zig build run-anthropic`. The sibling `.path` dependency in `build.zig.zon` is temporary during the SDK upgrade.
 
 ## API
 

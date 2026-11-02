@@ -13,6 +13,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const anthropic_dep = b.dependency("anthropic", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mod = b.addModule("instructor", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -20,6 +25,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "jsonschema", .module = jsonschema_dep.module("jsonschema") },
             .{ .name = "openai", .module = openai_dep.module("openai") },
+            .{ .name = "anthropic", .module = anthropic_dep.module("anthropic") },
         },
     });
 
@@ -66,7 +72,12 @@ pub fn build(b: *std.Build) void {
     const responses_tool_call_example = addExample(b, mod, target, optimize, "responses-tool-call-example", "examples/responses_tool_call.zig", "run-responses-tool-call", "Run Responses tool-call example");
     const classify_union_example = addExample(b, mod, target, optimize, "classify-union-example", "examples/classify_union.zig", "run-classify-union", "Run tagged-union classifier example");
 
+    const anthropic_example = addExample(b, mod, target, optimize, "anthropic-example", "examples/anthropic.zig", "run-anthropic", "Run Anthropic example");
+    const build_anthropic = b.step("anthropic-example", "Build Anthropic example without credentials");
+    build_anthropic.dependOn(anthropic_example);
+
     const examples_step = b.step("examples", "Build examples");
+    examples_step.dependOn(anthropic_example);
     examples_step.dependOn(openrouter_example);
     examples_step.dependOn(tool_planner_example);
     examples_step.dependOn(exact_citations_example);
@@ -114,7 +125,7 @@ fn addExample(
     });
 
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     const step = b.step(step_name, step_description);
     step.dependOn(&run.step);
     return &exe.step;

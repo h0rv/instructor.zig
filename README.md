@@ -1,8 +1,10 @@
 # instructor.zig
 
-An LLM client with typed results for Zig 0.17.0.
+Get structured data from LLMs as Zig types. This library requires Zig 0.17.0.
 
-Use `client.responses` for text input or `client.messages` for conversations across OpenAI Responses, OpenAI-compatible Chat Completions, and Anthropic Messages. Both use the configured provider and endpoint. Choosing a resource does not change the HTTP endpoint.
+Define a struct and call `parse`. Instructor generates its JSON Schema and validates the result. If parsing or validation fails, Instructor sends error feedback to the model and retries.
+
+Use the same `client.responses.parse` or `client.messages.parse` calls with OpenAI Responses, OpenAI-compatible Chat Completions, or Anthropic Messages. Choose the provider and endpoint in client configuration.
 
 The common `Client` API is unreleased. The existing `OpenAI`, `Anthropic`, and `Session` APIs remain available.
 
@@ -25,7 +27,7 @@ const dep = b.dependency("instructor", .{
 exe.root_module.addImport("instructor", dep.module("instructor"));
 ```
 
-## Create and parse
+## Extract a product
 
 Set `ANTHROPIC_API_KEY` for this example:
 
@@ -33,9 +35,10 @@ Set `ANTHROPIC_API_KEY` for this example:
 const std = @import("std");
 const instructor = @import("instructor");
 
-const Person = struct {
+const Product = struct {
     name: []const u8,
-    age: u8,
+    price: f64,
+    in_stock: bool,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -45,26 +48,48 @@ pub fn main(init: std.process.Init) !void {
     });
     defer ai.deinit();
 
-    var greeting = try ai.responses.create(.{ .input = "Say hello." });
-    defer greeting.deinit();
+    var product = try ai.responses.parse(Product, .{
+        .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+    });
+    defer product.deinit();
 
-    var person = try ai.responses.parse(Person, .{ .input = "Robby is 24." });
-    defer person.deinit();
-
-    std.debug.print("{s}\n", .{greeting.text});
-    std.debug.print("{s}: {}\n", .{ person.value.name, person.value.age });
+    std.debug.print("{s}: {d:.2}, in stock={}\n", .{
+        product.value.name,
+        product.value.price,
+        product.value.in_stock,
+    });
 }
 ```
 
-Use `create` for an ordinary response without an output schema. Use `parse` to generate a schema for `Person` and validate the result. Failed parsing or validation produces feedback for another attempt.
+Expected output:
 
-Both results own their memory. They remain valid after client cleanup if the backing allocator is still alive. Deinitialize each owner once and do not copy an active owner. You can move an owner without invalidating its data.
+```text
+Coffee mug: 12.50, in stock=true
+```
 
-Run the example with `zig build run-client`. It makes two live requests. To try the API without credentials or network access, run `zig build run-custom-transport`.
+The result owns its memory. It remains valid after client cleanup if the backing allocator is still alive. Deinitialize each owner once and do not copy an active owner.
+
+Run [this example](examples/client.zig) with `zig build run-client`. It makes a live request and may retry. To try the same extraction without credentials or network access, run `zig build run-custom-transport`.
+
+## What you can build
+
+| Feature | Example or guide |
+| --- | --- |
+| Generate schemas from Zig types. | [Product extraction](examples/client.zig). |
+| Validate field constraints and retry with error feedback. | [Name and age constraints](examples/openrouter.zig) and [retry options](docs/client.md#parsing-options-and-retries). |
+| Extract nested objects and arrays. | [Invoice with line items](examples/invoice_extraction.zig). |
+| Process reviews one at a time and free each result. | [Batch extraction](examples/batch_extract.zig) with `Session.reset()`. |
+| Classify text into typed cases. | [Tagged union classification](examples/classify_union.zig) and [support routing](examples/support_router.zig). |
+| Request answers with supporting quotes. | [Exact citations](examples/exact_citations.zig). Check quotes against the source before trusting them. |
+| Extract tasks or propose redactions. | [Meeting actions](examples/action_items.zig) and [PII redaction](examples/pii_redaction.zig). Review redactions before logging sensitive text. |
+| Observe requests and retries. | [Hooks and usage](docs/api.md#hooks). |
+| Use your own HTTP client. | [Offline custom transport](examples/custom_transport.zig). |
+
+Most advanced examples use `Session`, not the common client.
 
 ## Providers and requests
 
-Use `.provider = .openai` with `OPENAI_API_KEY` for OpenAI Responses. Choose `.endpoint = .chat_completions` and a `base_url` for compatible services. Set a model appropriate to the selected service. Model names are not restricted to a built-in catalog.
+With `Client.fromEnv`, use `.provider = .openai` and set `OPENAI_API_KEY` for OpenAI Responses. Choose `.endpoint = .chat_completions` and a `base_url` for compatible services. Set a model appropriate to the selected service. Model names are not restricted to a built-in catalog.
 
 `fromEnv` reads the process context you pass in. For servers, use `Client.init` with an explicit allocator and `std.Io`. Credentials can come from your own configuration:
 
@@ -86,7 +111,7 @@ defer ai.deinit();
 
 Client configuration strings and default `headers` are copied. Client defaults in `extra_body` and `extra_query` are deeply copied during initialization. Request values are borrowed only until the call returns.
 
-For a conversation, use `messages`. It has the same `create` and `parse` methods:
+For ordinary text without an output schema, use `create`. For a conversation, use `messages`. Both resources have `create` and `parse` methods:
 
 ```zig
 var reply = try ai.messages.create(.{
@@ -130,27 +155,27 @@ Without an injected transport, Instructor owns a pooled standard-library client.
 If your application already has a request arena, put results there:
 
 ```zig
-const person = try ai.responses.parseInto(Person, arena.allocator(), .{
-    .input = "Robby is 24.",
+const product = try ai.responses.parseInto(Product, arena.allocator(), .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
 });
 ```
 
-Here, `person` is a `Person` value and remains valid until you release the arena. There is no per-result `deinit`.
+Here, `product` is a `Product` value and remains valid until you release the arena. There is no per-result `deinit`.
 
 Use `parseWith` or `parseIntoWith` with compile-time `ParseOptions`:
 
 ```zig
-var person = try ai.responses.parseWith(Person, .{ .input = "Robby is 24." }, .{
-    .max_retries = 1,
-});
-defer person.deinit();
+var product = try ai.responses.parseWith(Product, .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+}, .{ .max_retries = 1 });
+defer product.deinit();
 ```
 
 Results include text and raw response data alongside token usage. Use `instructor.printError(err, &ai)` to inspect provider diagnostics after a failure.
 
 ## Scope
 
-The common client supports buffered text responses and typed parsing. It does not provide full native SDK coverage. Streaming, general tool conversations, multimodal input, and Vertex routing are not supported. Calls on one client are synchronous and must not run concurrently.
+The common client supports buffered text responses and typed parsing. It does not provide full native SDK coverage. There is no streaming or async API. Partial structured results, general tool conversations, multimodal input, and Vertex routing are not supported. Do not run calls concurrently on one client.
 
 The existing lower-level provider and `Session` APIs remain available for their supported extraction modes and image inputs. See [the API reference](docs/api.md), [existing examples](examples), and [the new client guide](docs/client.md).
 

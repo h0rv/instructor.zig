@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
     var session = instructor.session(gpa, &client);
     defer session.deinit();
 
-    const text = "Robby Hill, robby@example.com, called from +1-415-555-0134. Token sk-live-abc123 should not be logged.";
+    const text = "Alex Smith, alex@example.com, called from +1-415-555-0134. Token sk-live-abc123 should not be logged.";
 
     const plan = session.create(RedactionPlan, instructor.OpenAI.Request{
         .model = "openai/gpt-oss-20b:free",

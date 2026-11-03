@@ -8,14 +8,32 @@ The client owns state at a stable heap address. Resource handles borrow that sta
 
 ## Create and parse
 
-Use `create` for ordinary output and `parse` for a typed result:
+Use `parse` to generate a schema from a Zig type and validate the result:
+
+```zig
+const Product = struct {
+    name: []const u8,
+    price: f64,
+    in_stock: bool,
+};
+
+var product = try client.responses.parse(Product, .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+});
+defer product.deinit();
+
+std.debug.print("{s}: {d:.2}, in stock={}\n", .{
+    product.value.name,
+    product.value.price,
+    product.value.in_stock,
+});
+```
+
+For ordinary text without an output schema, use `create`:
 
 ```zig
 var greeting = try client.responses.create(.{ .input = "Say hello." });
 defer greeting.deinit();
-
-var person = try client.responses.parse(Person, .{ .input = "Robby is 24." });
-defer person.deinit();
 ```
 
 These names follow the official SDK conventions for [OpenAI Responses parsing](https://github.com/openai/openai-python/blob/main/helpers.md#parsing-responses-api-output) and [Anthropic Messages parsing](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/resources/messages/messages.py). The common client exposes typed fields for common controls. Use request extras for other provider fields. This is not full native SDK coverage.
@@ -70,16 +88,16 @@ var reply = try client.messages.create(.{
 });
 defer reply.deinit();
 
-var person = try client.messages.parse(Person, .{
+var product = try client.messages.parse(Product, .{
     .messages = &.{
         .{
             .role = .user,
-            .content = "Robby is 24.",
+            .content = "Extract the product: Coffee mug costs $12.50 and is in stock.",
         },
     },
     .max_tokens = 256,
 });
-defer person.deinit();
+defer product.deinit();
 ```
 
 | Field | Type | Default |
@@ -147,13 +165,13 @@ const request_query = [_]instructor.QueryParam{
     .{ .name = "tag", .value = "three" },
 };
 
-var person = try client.responses.parse(Person, .{
-    .input = "Robby is 24.",
+var product = try client.responses.parse(Product, .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
     .extra_body = extra.value,
     .extra_headers = &request_headers,
     .extra_query = &request_query,
 });
-defer person.deinit();
+defer product.deinit();
 ```
 
 ### Merge and validation rules
@@ -195,8 +213,8 @@ The default HTTP client owns its pool in stable heap storage. A custom transport
 `parseInto` and `parseIntoWith` return `T` directly without a result owner:
 
 ```zig
-const person = try client.responses.parseInto(Person, arena.allocator(), .{
-    .input = "Robby is 24.",
+const product = try client.responses.parseInto(Product, arena.allocator(), .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
 });
 ```
 
@@ -209,13 +227,13 @@ The common client reuses `createDetailedWithArena`. Schema generation and local 
 `ParseOptions` provides `mode`, `max_retries`, `validate`, optional `schema_options`, and `parse_options`. These options are compile-time values. The default permits three retries after the first attempt. Transport failures are returned immediately rather than retried as validation failures.
 
 ```zig
-var person = try client.responses.parseWith(Person, .{ .input = "Robby is 24." }, .{
-    .max_retries = 1,
-});
-defer person.deinit();
+var product = try client.responses.parseWith(Product, .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+}, .{ .max_retries = 1 });
+defer product.deinit();
 
-const arena_person = try client.responses.parseIntoWith(Person, arena.allocator(), .{
-    .input = "Robby is 24.",
+const arena_product = try client.responses.parseIntoWith(Product, arena.allocator(), .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
 }, .{ .max_retries = 1 });
 ```
 
@@ -231,4 +249,4 @@ The generated SDKs are unchanged. Existing `OpenAI`, `Anthropic`, `Session`, and
 
 Low-level providers keep their existing SDK dispatch when no transport is supplied. Request extras are applied on those paths too. Their response limit applies to injected transports. The common client always uses a bounded transport, including when it creates the default implementation.
 
-This common API supports buffered text only. It does not support streaming, arbitrary tool conversations, multimodal input, dynamic provider registration, or Vertex routing. The Responses resource currently accepts only text input. The Messages resource accepts text conversations. Neither resource provides full native SDK coverage.
+This common API supports buffered text only. It does not support streaming or partial structured results. There is no async API. Arbitrary tool conversations, multimodal input, dynamic provider registration, and Vertex routing are not supported. The Responses resource currently accepts only text input. The Messages resource accepts text conversations. Neither resource provides full native SDK coverage.

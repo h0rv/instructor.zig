@@ -7,21 +7,40 @@ Target Zig version: `0.17.0` stable APIs.
 `instructor.Client` has resource fields `responses` and `messages`. Use them without resource parentheses:
 
 ```zig
+const Product = struct {
+    name: []const u8,
+    price: f64,
+    in_stock: bool,
+};
+
+var product = try client.responses.parse(Product, .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+});
+defer product.deinit();
+
+std.debug.print("{s}: {d:.2}, in stock={}\n", .{
+    product.value.name,
+    product.value.price,
+    product.value.in_stock,
+});
+
+const messages = [_]instructor.Message{
+    .{ .role = .user, .content = "Extract the product: Coffee mug costs $12.50 and is in stock." },
+};
+var parsed = try client.messages.parse(Product, .{ .messages = &messages });
+defer parsed.deinit();
+```
+
+Use `create` for ordinary text without an output schema:
+
+```zig
 var response = try client.responses.create(.{ .input = "Say hello." });
 defer response.deinit();
 
-var person = try client.responses.parse(Person, .{ .input = "Robby is 24." });
-defer person.deinit();
-
-const messages = [_]instructor.Message{
-    .{ .role = .user, .content = "Robby is 24." },
-};
-
-var reply = try client.messages.create(.{ .messages = &messages });
+var reply = try client.messages.create(.{ .messages = &.{
+    .{ .role = .user, .content = "Say hello." },
+} });
 defer reply.deinit();
-
-var parsed = try client.messages.parse(Person, .{ .messages = &messages });
-defer parsed.deinit();
 ```
 
 The resource fields borrow stable heap state owned by the client. Moving the outer client does not invalidate resource handles. Do not copy an active client owner or use a handle after `client.deinit()`. Results may outlive the client if their backing allocator is still alive.
@@ -75,7 +94,7 @@ This matches Zig style and `std.Io`: caller controls I/O, allocation, and lifeti
 - Full JSON Schema spec validation.
 - `T.validate()` hooks.
 - Streaming.
-- Union extraction.
+- Arbitrary root unions without an object wrapper.
 - Multi-provider parity with `instructor-go`.
 - Rich error payloads.
 - Full OpenAI generated SDK correctness.
@@ -98,15 +117,15 @@ const request: instructor.OpenAI.Request = .{
     .messages = &.{
         .{
             .role = .user,
-            .content = "Robby is 24.",
+            .content = "Extract the product: Coffee mug costs $12.50 and is in stock.",
         },
     },
 };
 
-const person = try session.create(Person, request, .{});
+const product = try session.create(Product, request, .{});
 ```
 
-`person` is valid until `session.deinit()`.
+`product` is valid until `session.deinit()`.
 
 ## Type-level API
 
@@ -163,7 +182,7 @@ Possible use:
 var s = instructor.session(gpa, &client);
 defer s.deinit();
 
-const person = try s.create(Person, req, .{});
+const product = try s.create(Product, req, .{});
 ```
 
 ## Why not return wrapper
@@ -171,9 +190,9 @@ const person = try s.create(Person, req, .{});
 Returning wrapper is safe but noisy:
 
 ```zig
-var result = try instructor.create(Person, ...);
+var result = try instructor.create(Product, ...);
 defer result.deinit();
-const person = result.value;
+const product = result.value;
 ```
 
 Session makes lifetime explicit once and returns `T` directly:
@@ -182,7 +201,7 @@ Session makes lifetime explicit once and returns `T` directly:
 var session = instructor.session(gpa, &client);
 defer session.deinit();
 
-const person = try session.create(Person, req, .{});
+const product = try session.create(Product, req, .{});
 ```
 
 This is better for app code and still memory-safe.
@@ -192,11 +211,11 @@ This is better for app code and still memory-safe.
 All allocations needed by returned `T` live in `Session` arena.
 
 ```zig
-const person = try session.create(Person, req, .{});
-// person.name, slices, nested arrays valid here
+const product = try session.create(Product, req, .{});
+// product.name, price, and in_stock are valid here
 
 session.deinit();
-// person invalid after this point
+// product invalid after this point
 ```
 
 `Session.reset()` frees all prior results and usage/raw debug memory. Any previously returned `T` becomes invalid after reset.
@@ -276,8 +295,8 @@ Example:
 var arena = std.heap.ArenaAllocator.init(gpa);
 defer arena.deinit();
 
-const person = try instructor.createWithArena(
-    Person,
+const product = try instructor.createWithArena(
+    Product,
     gpa,
     arena.allocator(),
     &client,
@@ -726,4 +745,4 @@ pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
 - Hook API for request/response/parse/retry/completion events.
 - Fake provider tests for success, retry, detailed result, and hooks.
 - OpenAI-compatible HTTP provider for Responses and Chat Completions.
-- Optional validation integration later.
+- Local validation of supported JSON Schema constraints, enabled by default.

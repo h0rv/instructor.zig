@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
         .model = instructor.Anthropic.default_model,
         .messages = &.{
             .{ .role = .system, .content = "Extract the person from the user's text." },
-            .{ .role = .user, .content = "Robby is 24." },
+            .{ .role = .user, .content = "Alex is 24." },
         },
     }, .{ .schema_options = instructor.anthropic_schema_options }) catch |err| {
         instructor.printError(err, &client);

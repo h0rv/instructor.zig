@@ -54,8 +54,8 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     const transcript =
-        \\Maya: Robby, can you finish the OpenRouter example today?
-        \\Robby: Yes, I will clean up the API docs and add a function-calling style demo by Friday.
+        \\Maya: Alex, can you finish the OpenRouter example today?
+        \\Alex: Yes, I will clean up the API docs and add a function-calling style demo by Friday.
         \\Maya: Great. I'll review jsonschema compatibility tomorrow. The launch notes can wait until next week.
     ;
 

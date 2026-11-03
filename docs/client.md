@@ -195,7 +195,7 @@ Only buffered responses are supported. An extra `stream` field set to `true` or 
 
 Request headers override client defaults and generated headers case-insensitively, including authentication and content type. Each header name is sent once. If a name repeats in one list, the last value wins. Header names and values are validated. Invalid names or control characters return `error.InvalidHeader`. Body framing is managed by HTTP: `Content-Length` and `Transfer-Encoding` overrides return `error.ReservedHeader`. Be careful when replacing credentials or content type.
 
-The OpenAI Responses, OpenAI-compatible Chat Completions, and Anthropic Messages adapters apply these rules. Extra fields also pass through the existing low-level provider SDK paths. Generated SDK files and dependency pins are unchanged.
+The OpenAI Responses, OpenAI-compatible Chat Completions, and Anthropic Messages adapters apply these rules. Extra fields also pass through the low-level provider SDK paths.
 
 ## Memory rules
 
@@ -243,9 +243,7 @@ If `schema_options` is omitted, Instructor chooses the provider profile. Anthrop
 
 Hooks use the existing event types. A configured hook context is borrowed and must outlive calls. Do not destroy or reenter the client from a hook.
 
-## Compatibility and limits
-
-The generated SDKs are unchanged. Existing `OpenAI`, `Anthropic`, `Session`, and low-level extraction functions remain available with their existing names.
+## Transport and limits
 
 Low-level providers keep their existing SDK dispatch when no transport is supplied. Request extras are applied on those paths too. Their response limit applies to injected transports. The common client always uses a bounded transport, including when it creates the default implementation.
 

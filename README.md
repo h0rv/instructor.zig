@@ -6,14 +6,12 @@ Define a struct and call `parse`. Instructor generates its JSON Schema and valid
 
 Use the same `client.responses.parse` or `client.messages.parse` calls with OpenAI Responses, OpenAI-compatible Chat Completions, or Anthropic Messages. Choose the provider and endpoint in client configuration.
 
-The common `Client` API is unreleased. The existing `OpenAI`, `Anthropic`, and `Session` APIs remain available.
-
 ## Install
 
-For this unreleased API, fetch the feature branch:
+Add the dependency:
 
 ```sh
-zig fetch --save=instructor git+https://github.com/h0rv/instructor.zig.git#feat/llm-client
+zig fetch --save=instructor git+https://github.com/h0rv/instructor.zig.git#main
 ```
 
 Pin a commit for reproducible builds. Add the module in `build.zig`:
@@ -177,9 +175,7 @@ Results include text and raw response data alongside token usage. Use `instructo
 
 The common client supports buffered text responses and typed parsing. It does not provide full native SDK coverage. There is no streaming or async API. Partial structured results, general tool conversations, multimodal input, and Vertex routing are not supported. Do not run calls concurrently on one client.
 
-The existing lower-level provider and `Session` APIs remain available for their supported extraction modes and image inputs. See [the API reference](docs/api.md), [existing examples](examples), and [the new client guide](docs/client.md).
-
-Generated SDK files and dependency pins are unchanged. Instructor adapters use the generated SDKs without requiring handwritten changes to them.
+Use the provider and `Session` APIs for additional extraction modes and image inputs. See [the API reference](docs/api.md), [examples](examples), and [client guide](docs/client.md).
 
 ## Build
 

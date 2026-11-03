@@ -63,7 +63,7 @@ Both resources also offer `parseWith`, `parseInto`, and `parseIntoWith`. Parsing
 
 ## Retained lower-level API
 
-The remaining sections describe the existing `OpenAI`, `Anthropic`, and `Session` APIs. Request extras work across all three HTTP adapters for ordinary and typed requests, including provider SDK paths without an injected transport. Generated SDK files and dependency pins are unchanged.
+The following sections cover `OpenAI`, `Anthropic`, and `Session`. Request extras work across all three HTTP adapters for ordinary and typed requests, including provider SDK paths without an injected transport.
 
 Status: v0 design. Parsed values are validated by default with `jsonschema.validateValue` for supported metadata.
 

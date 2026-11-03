@@ -62,21 +62,30 @@ const Person = struct {
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
+    const key = init.environ_map.get("OPENAI_API_KEY") orelse
+        return error.MissingApiKey;
 
     var client = instructor.OpenAI.init(.{
         .allocator = gpa,
         .io = init.io,
-        .api_key = init.environ_map.get("OPENAI_API_KEY") orelse return error.MissingApiKey,
+        .api_key = key,
     });
     defer client.deinit();
 
     var session = instructor.session(gpa, &client);
     defer session.deinit();
 
-    const person = try session.create(Person, instructor.OpenAI.Request{
+    const request: instructor.OpenAI.Request = .{
         .model = instructor.OpenAI.default_model,
-        .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
-    }, .{});
+        .messages = &.{
+            .{
+                .role = .user,
+                .content = "Robby is 24.",
+            },
+        },
+    };
+
+    const person = try session.create(Person, request, .{});
 
     std.debug.print("{s}: {}\n", .{ person.name, person.age });
 }
@@ -92,22 +101,36 @@ Robby: 24
 
 ## Anthropic
 
-`Anthropic` uses the native `/messages` API through `anthropic.zig` with API version `2026-10-21`.
+`Anthropic` uses the native `/v1/messages` API through `anthropic.zig` with API version `2026-10-21`.
 
 ```zig
+const key = init.environ_map.get("ANTHROPIC_API_KEY") orelse
+    return error.MissingApiKey;
+
 var client = instructor.Anthropic.init(.{
     .allocator = init.gpa,
     .io = init.io,
-    .api_key = init.environ_map.get("ANTHROPIC_API_KEY") orelse return error.MissingApiKey,
+    .api_key = key,
     .max_tokens = 1024,
 });
 defer client.deinit();
+
 var session = instructor.session(init.gpa, &client);
 defer session.deinit();
-const person = try session.create(Person, instructor.Anthropic.Request{
+
+const request: instructor.Anthropic.Request = .{
     .model = instructor.Anthropic.default_model,
-    .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
-}, .{ .schema_options = instructor.anthropic_schema_options });
+    .messages = &.{
+        .{
+            .role = .user,
+            .content = "Robby is 24.",
+        },
+    },
+};
+
+const person = try session.create(Person, request, .{});
+
+std.debug.print("{s}: {}\n", .{ person.name, person.age });
 ```
 
 The default mode sends `output_config.format` with a JSON Schema. `.tool_call` sends a strict native tool without forcing its use. `.tool_call_required` explicitly forces that named tool and depends on model support. `.json_object` and `.responses_*` modes return `UnsupportedMode`. Images return `UnsupportedImages`.
@@ -116,7 +139,7 @@ System messages become top-level system text blocks. The required `max_tokens` d
 
 The remote schema omits unsupported numeric, string length, and array bounds, including bounds inferred by the default Instructor profile. Core still validates the original constraints locally and retries on failure. `anthropic_schema_options` disables inferred bounds and `$defs`. References, recursion, and unsupported schema constructs return explicit errors rather than changing their meaning. Refusals and token truncation are errors even with HTTP 200. Use `instructor.printError(err, &client)` to inspect the status and response body.
 
-Build the example without credentials with `zig build anthropic-example`. Run it with `ANTHROPIC_API_KEY` set using `zig build run-anthropic`. The sibling `.path` dependency in `build.zig.zon` is temporary during the SDK upgrade.
+Build the example without credentials with `zig build anthropic-example`. Run it with `ANTHROPIC_API_KEY` set using `zig build run-anthropic`.
 
 ## API
 
@@ -201,6 +224,7 @@ You can inspect the schema sent to providers:
 ```zig
 var schema = try instructor.schemaAlloc(User, gpa, instructor.openai_schema_options);
 defer schema.deinit(gpa);
+
 std.debug.print("{s}\n", .{schema.schema_json});
 ```
 
@@ -340,14 +364,18 @@ const images = [_]instructor.OpenAI.Image{.{
     .detail = "low",
 }};
 
-const value = try session.create(T, .{
+const request: instructor.OpenAI.Request = .{
     .model = "gpt-5.4-nano",
-    .messages = &.{.{
-        .role = .user,
-        .content = "Inspect this image.",
-        .images = &images,
-    }},
-}, .{});
+    .messages = &.{
+        .{
+            .role = .user,
+            .content = "Inspect this image.",
+            .images = &images,
+        },
+    },
+};
+
+const value = try session.create(T, request, .{});
 ```
 
 Example:

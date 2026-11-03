@@ -46,15 +46,20 @@ var client = instructor.OpenAI.init(.{
 });
 defer client.deinit();
 
-var session = instructor.Session.init(gpa, &client);
+var session = instructor.session(gpa, &client);
 defer session.deinit();
 
-const person = try session.create(Person, .{
+const request: instructor.OpenAI.Request = .{
     .model = instructor.OpenAI.default_model,
     .messages = &.{
-        .{ .role = .user, .content = "Robby is 24." },
+        .{
+            .role = .user,
+            .content = "Robby is 24.",
+        },
     },
-}, .{});
+};
+
+const person = try session.create(Person, request, .{});
 ```
 
 `person` is valid until `session.deinit()`.

@@ -1,51 +1,133 @@
 # Common LLM client
 
-`Client` is an additive API over the existing provider adapters. Use one client for a sequence of synchronous calls. Requests use the same `Request` and `Message` types across OpenAI Responses, Chat Completions, and Anthropic Messages.
+`Client` provides buffered text responses and typed parsing through the existing provider adapters. Choose the provider and endpoint when you configure the client. Model names do not select credentials or routing.
 
-The provider is chosen explicitly. Instructor does not guess credentials or routing from model names. OpenAI-compatible services use the OpenAI adapter with a custom base URL and endpoint.
+Use `client.responses()` for text input or `client.messages()` for conversations. Both views use the same internal adapters and configured HTTP endpoint. Calling `responses()` on an Anthropic client still uses Anthropic Messages. Calling `messages()` on an OpenAI Responses client still uses OpenAI Responses.
 
-## Operations
+Each call to `responses()` or `messages()` creates a borrowed resource handle. The parentheses are intentional. The client does not store a pointer to itself. Keep the client alive and at the same address while a handle is in use. Calls on one client are synchronous and must not run concurrently.
+
+## Create and parse
+
+Use `create` for ordinary output and `parse` for a typed result:
+
+```zig
+var greeting = try client.responses().create(.{ .input = "Say hello." });
+defer greeting.deinit();
+
+var person = try client.responses().parse(Person, .{ .input = "Robby is 24." });
+defer person.deinit();
+```
+
+These names follow the official SDK conventions for [OpenAI Responses parsing](https://github.com/openai/openai-python/blob/main/helpers.md#parsing-responses-api-output) and [Anthropic Messages parsing](https://github.com/anthropics/anthropic-sdk-python/blob/main/src/anthropic/resources/messages/messages.py). The common client supports only the fields described below, not the full native SDK APIs.
+
+Both views have the same methods. Here, `params` means the parameters for the selected view:
 
 | Method | Result | Purpose |
 | --- | --- | --- |
-| `text(prompt)` | `Response` | One ordinary user prompt. |
-| `complete(request)` | `Response` | Ordinary text with conversation history and controls. |
-| `extract(T, request)` | `Owned(T)` | Typed structured extraction with default validation and retries. |
-| `extractWith(T, request, options)` | `Owned(T)` | Extraction with compile-time settings. |
-| `extractInto(T, allocator, request)` | `T` | Extraction into caller-owned arena memory. |
-| `extractIntoWith(T, allocator, request, options)` | `T` | Caller-owned extraction with compile-time settings. |
+| `create(params)` | `Response` | Ordinary text without an output schema. |
+| `parse(T, params)` | `Owned(T)` | Typed parsing with default validation and retries. |
+| `parseWith(T, params, options)` | `Owned(T)` | Typed parsing with compile-time `ParseOptions`. |
+| `parseInto(T, allocator, params)` | `T` | Typed parsing into caller-owned arena memory. |
+| `parseIntoWith(T, allocator, params, options)` | `T` | Caller-owned parsing with compile-time `ParseOptions`. |
 
 `Response` has `text`, `raw_response`, `usage`, `provider`, and `model`. `Owned(T)` also has `value`. Both own an arena and have parameterless `deinit` methods. Their allocators have stable contexts, including when custom JSON parsers retain the allocator passed to them.
 
-`extractInto` and `extractIntoWith` return `T` directly and do not create result owners. Use a result arena, then free that arena as a group. Successful results retain copied text, including with `.allocate = .alloc_if_needed`.
+`create` sends no output schema or extraction tools. It concatenates text blocks and preserves the raw response. Explicit refusals and incomplete output are errors rather than successful partial text. Tool-call arguments are not returned as ordinary text.
+
+## Parameters
+
+### Responses view
+
+`responses()` accepts a required text `input`. It does not yet accept arrays of input items or multimodal input.
+
+| Field | Type | Requirement |
+| --- | --- | --- |
+| `input` | `[]const u8` | Required. |
+| `model` | `?[]const u8` | Optional model override. |
+| `max_output_tokens` | `?u32` | Optional output-token limit. |
+| `temperature` | `?f64` | Optional temperature. |
+
+### Messages view
+
+`messages()` accepts a required slice of `Message` values. Each message has a text `content` and a `system`, `user`, or `assistant` role.
+
+```zig
+var reply = try client.messages().create(.{
+    .messages = &.{
+        .{
+            .role = .system,
+            .content = "Answer briefly.",
+        },
+        .{
+            .role = .user,
+            .content = "What is an arena allocator?",
+        },
+    },
+    .max_tokens = 256,
+});
+defer reply.deinit();
+
+var person = try client.messages().parse(Person, .{
+    .messages = &.{
+        .{
+            .role = .user,
+            .content = "Robby is 24.",
+        },
+    },
+    .max_tokens = 256,
+});
+defer person.deinit();
+```
+
+| Field | Type | Requirement |
+| --- | --- | --- |
+| `messages` | `[]const Message` | Required. |
+| `model` | `?[]const u8` | Optional model override. |
+| `max_tokens` | `?u32` | Optional output-token limit. |
+| `temperature` | `?f64` | Optional temperature. |
+
+Both views use the selected provider's output-token setting. A token limit of zero is rejected. Model names are forwarded without a built-in catalog check. The selected model must support the requested feature. OpenAI temperature must be finite and between zero and two. Anthropic temperature returns `UnsupportedControl`.
 
 ## Memory rules
 
 - Client configuration strings and headers are copied.
 - Credentials can be provided through `Client.init` without environment access.
 - `Client.fromEnv` reads only the supplied process context.
-- Message and prompt inputs remain borrowed during the call.
+- Request input and messages remain borrowed until the call returns.
 - Results are independent of client lifetime, but their backing allocator must stay alive.
 - Deinitialize an owner exactly once. Do not copy active owners.
 - Injected transport contexts and I/O implementations remain caller-owned.
 
-The default HTTP client owns its pool. Its state has a stable heap address so moving the outer client does not invalidate pool references. A custom transport can share its own pool across several Instructor clients.
+The default HTTP client owns its pool. Its state has a stable heap address so moving the outer client does not invalidate pool references. A custom transport can share its own pool across several Instructor clients. See [the transport contract](transport.md).
 
-## Requests
+`parseInto` and `parseIntoWith` return `T` directly without a result owner:
 
-A request may contain messages, a prompt, or both. When both are supplied, the prompt is appended as a user message. An input with neither returns `MissingInput`.
+```zig
+const person = try client.responses().parseInto(Person, arena.allocator(), .{
+    .input = "Robby is 24.",
+});
+```
 
-A request model overrides the client default. Model names are forwarded without a built-in catalog check. The selected model must support the requested feature.
+Use a result arena, then free that arena as a group. There is no per-result `deinit`. Successful results retain copied text, including with `.allocate = .alloc_if_needed`.
 
-The common API accepts text messages with `system`, `user`, and `assistant` roles. `max_output_tokens` maps to the provider's output-token setting. A value of zero is rejected. OpenAI temperature must be finite and between zero and two. Anthropic temperature returns `UnsupportedControl`.
+## Parsing options and retries
 
-Ordinary completion sends no output schema or extraction tools. It concatenates text blocks and preserves the raw response. Explicit refusals and incomplete output are errors rather than successful partial text. Tool-call arguments are not returned as ordinary text.
+The common client reuses `createDetailedWithArena`. Schema generation and local validation remain in the existing core. Failed parsing or validation adds feedback through the existing provider retry methods. Usage covers every parsing attempt.
 
-## Extraction
+`ParseOptions` provides `mode`, `max_retries`, `validate`, optional `schema_options`, and `parse_options`. These options are compile-time values. The default permits three retries after the first attempt. Transport failures are returned immediately rather than retried as validation failures.
 
-The common client reuses `createDetailedWithArena`. Schema generation and local validation remain in the existing core. Failed parsing or validation adds feedback through the existing provider retry methods. Usage covers every extraction attempt.
+```zig
+var person = try client.responses().parseWith(Person, .{ .input = "Robby is 24." }, .{
+    .max_retries = 1,
+});
+defer person.deinit();
 
-`ExtractionOptions` provides `mode`, `max_retries`, `validate`, optional `schema_options`, and `parse_options`. These options are compile-time values. The default permits three retries after the first attempt. Transport failures are returned immediately rather than retried as validation failures.
+const arena_person = try client.responses().parseIntoWith(Person, arena.allocator(), .{
+    .input = "Robby is 24.",
+}, .{ .max_retries = 1 });
+```
+
+The same methods work on `messages()` with its message parameters.
 
 If `schema_options` is omitted, Instructor chooses the provider profile. Anthropic remote schemas omit unsupported bounds while core validation retains explicit constraints. Recursive and unsupported schemas still return explicit errors.
 
@@ -53,8 +135,8 @@ Hooks use the existing event types. A configured hook context is borrowed and mu
 
 ## Compatibility and limits
 
-The generated SDKs are unchanged. Existing `OpenAI`, `Anthropic`, `Session`, and low-level extraction functions remain available.
+The generated SDKs are unchanged. Existing `OpenAI`, `Anthropic`, `Session`, and low-level extraction functions remain available with their existing names.
 
 Low-level providers keep their existing SDK dispatch when no transport is supplied. Their response limit applies to injected transports. The common client always uses a bounded transport, including when it creates the default implementation.
 
-This first common API covers buffered text completion and typed extraction. It does not claim streaming, arbitrary tool conversations, multimodal message normalization, dynamic provider registration, or Vertex support. Those features need explicit contracts rather than silent fallbacks.
+This common API supports buffered text only. It does not support streaming, arbitrary tool conversations, multimodal input, dynamic provider registration, or Vertex routing. The Responses view currently accepts only text input. The Messages view accepts text conversations. Neither view provides full native SDK coverage.

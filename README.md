@@ -1,8 +1,8 @@
 # instructor.zig
 
-A provider-agnostic LLM client with typed extraction for Zig 0.17.0.
+An LLM client with typed results for Zig 0.17.0.
 
-Use the same request API for OpenAI Responses, OpenAI-compatible Chat Completions, or Anthropic Messages. Instructor handles provider formats and authentication. You control allocation and result lifetimes.
+Use `responses()` for text input or `messages()` for conversations across OpenAI Responses, OpenAI-compatible Chat Completions, and Anthropic Messages. Both use the configured provider and endpoint. Choosing a view does not change the HTTP endpoint.
 
 The common `Client` API is unreleased. The existing `OpenAI`, `Anthropic`, and `Session` APIs remain available.
 
@@ -25,7 +25,7 @@ const dep = b.dependency("instructor", .{
 exe.root_module.addImport("instructor", dep.module("instructor"));
 ```
 
-## Text and typed extraction
+## Create and parse
 
 Set `ANTHROPIC_API_KEY` for this example:
 
@@ -45,10 +45,10 @@ pub fn main(init: std.process.Init) !void {
     });
     defer ai.deinit();
 
-    var greeting = try ai.text("Say hello.");
+    var greeting = try ai.responses().create(.{ .input = "Say hello." });
     defer greeting.deinit();
 
-    var person = try ai.extract(Person, .{ .prompt = "Robby is 24." });
+    var person = try ai.responses().parse(Person, .{ .input = "Robby is 24." });
     defer person.deinit();
 
     std.debug.print("{s}\n", .{greeting.text});
@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-`text` sends an ordinary request without a schema or extraction tools. `extract` generates the schema for `Person`, parses the response, and validates it. Parse and validation failures produce feedback for another attempt. Provider schema defaults are selected automatically.
+Use `create` for an ordinary response without an output schema. Use `parse` to generate a schema for `Person` and validate the result. Failed parsing or validation produces feedback for another attempt.
 
 Both results own their memory. They remain valid after client cleanup if the backing allocator is still alive. Deinitialize each owner once and do not copy an active owner. You can move an owner without invalidating its data.
 
@@ -86,21 +86,26 @@ defer ai.deinit();
 
 Client configuration strings and additional `headers` are copied. Request inputs are borrowed only until the call returns.
 
-For a conversation, use `complete`. A supplied `prompt` becomes a user message after the history:
+For a conversation, use `messages()`. It has the same `create` and `parse` methods:
 
 ```zig
-var reply = try ai.complete(.{
+var reply = try ai.messages().create(.{
     .messages = &.{
         .{
             .role = .system,
             .content = "Answer briefly.",
         },
+        .{
+            .role = .user,
+            .content = "What is an arena allocator?",
+        },
     },
-    .prompt = "What is an arena allocator?",
-    .max_output_tokens = 256,
+    .max_tokens = 256,
 });
 defer reply.deinit();
 ```
+
+`responses()` currently accepts only text in `input`. Its token limit is `max_output_tokens`. Each view is a borrowed handle created on the call. Keep the client alive while using it.
 
 Requests can override `model`. OpenAI requests also support `temperature`. The current Anthropic adapter rejects that control instead of silently ignoring it.
 
@@ -118,22 +123,22 @@ Other HTTP clients implement the same small callback. See [the transport contrac
 
 Without an injected transport, Instructor owns a pooled standard-library client. It keeps TLS verification enabled and does not follow redirects. The default response limit is 8 MiB, applied after decompression to success and error bodies. Set `max_response_bytes` to change it.
 
-## Control memory and extraction
+## Control memory and parsing
 
 If your application already has a request arena, put results there:
 
 ```zig
-const person = try ai.extractInto(Person, arena.allocator(), .{
-    .prompt = "Robby is 24.",
+const person = try ai.responses().parseInto(Person, arena.allocator(), .{
+    .input = "Robby is 24.",
 });
 ```
 
 Here, `person` is a `Person` value and remains valid until you release the arena. There is no per-result `deinit`.
 
-Use `extractWith` or `extractIntoWith` for compile-time extraction settings:
+Use `parseWith` or `parseIntoWith` with compile-time `ParseOptions`:
 
 ```zig
-var person = try ai.extractWith(Person, .{ .prompt = "Robby is 24." }, .{
+var person = try ai.responses().parseWith(Person, .{ .input = "Robby is 24." }, .{
     .max_retries = 1,
 });
 defer person.deinit();
@@ -143,7 +148,7 @@ Results include text and raw response data alongside token usage. Use `instructo
 
 ## Scope
 
-The common client currently supports buffered text completion and structured extraction. It does not yet expose streaming, general tool conversations, multimodal messages, or Vertex routing. Calls on one client are synchronous and must not run concurrently.
+The common client supports buffered text responses and typed parsing. It does not provide full native SDK coverage. Streaming, general tool conversations, multimodal input, and Vertex routing are not supported. Calls on one client are synchronous and must not run concurrently.
 
 The existing lower-level provider and `Session` APIs remain available for their supported extraction modes and image inputs. See [the API reference](docs/api.md), [existing examples](examples), and [the new client guide](docs/client.md).
 

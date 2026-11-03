@@ -16,7 +16,7 @@ pub const Message = struct {
 
 /// A prompt is appended as a user message after any supplied conversation.
 /// All input strings are borrowed only for the duration of the call.
-pub const Request = struct {
+const Request = struct {
     prompt: ?[]const u8 = null,
     messages: []const Message = &.{},
     model: ?[]const u8 = null,
@@ -69,7 +69,7 @@ pub const EnvConfig = struct {
 
 /// These options are compile-time because schema generation depends on them.
 /// An omitted schema profile uses the selected provider's defaults.
-pub const ExtractionOptions = struct {
+pub const ParseOptions = struct {
     mode: types.Mode = .json_schema,
     max_retries: u8 = 3,
     validate: bool = true,
@@ -239,23 +239,28 @@ pub const Client = struct {
         };
     }
 
-    /// Convenience for one user prompt. No schema or extraction tools are sent.
-    pub fn text(self: *Client, prompt: []const u8) !Response {
-        return self.complete(.{ .prompt = prompt });
+    /// A borrowed conversation resource, independent of the configured wire API.
+    pub fn messages(self: *Client) Messages {
+        return .{ .client = self };
     }
 
-    pub fn complete(self: *Client, request: Request) !Response {
+    /// A borrowed Responses-style resource with a text input.
+    pub fn responses(self: *Client) Responses {
+        return .{ .client = self };
+    }
+
+    fn createRequest(self: *Client, request: Request) !Response {
         self.clearLastError();
         const arena = try createArena(self.allocator);
         errdefer destroyArena(arena);
         const allocator = arena.allocator();
-        const messages = try self.prepare(allocator, request);
+        const conversation = try self.prepare(allocator, request);
         const model = try allocator.dupe(u8, request.model orelse self.model);
 
         if (self.hooks) |hooks| hooks.emit(.request_start, .{});
         const completion = switch (self.backend) {
-            .openai => |*provider| try provider.completeText(allocator, try openaiRequest(allocator, request, model, messages)),
-            .anthropic => |*provider| try provider.completeText(allocator, try anthropicRequest(allocator, request, model, messages)),
+            .openai => |*provider| try provider.completeText(allocator, try openaiRequest(allocator, request, model, conversation)),
+            .anthropic => |*provider| try provider.completeText(allocator, try anthropicRequest(allocator, request, model, conversation)),
         };
         if (self.hooks) |hooks| {
             hooks.emit(.response_received, .{ .response_text = completion.text, .raw_response = completion.raw_response, .usage = completion.usage });
@@ -271,16 +276,12 @@ pub const Client = struct {
         };
     }
 
-    pub fn extract(self: *Client, comptime T: type, request: Request) !Owned(T) {
-        return self.extractWith(T, request, .{});
-    }
-
-    pub fn extractWith(self: *Client, comptime T: type, request: Request, comptime options: ExtractionOptions) !Owned(T) {
+    fn parseRequest(self: *Client, comptime T: type, request: Request, comptime options: ParseOptions) !Owned(T) {
         self.clearLastError();
         const arena = try createArena(self.allocator);
         errdefer destroyArena(arena);
         const allocator = arena.allocator();
-        const result = try self.extractDetailedInto(T, allocator, request, options);
+        const result = try self.parseDetailedInto(T, allocator, request, options);
         const model = try allocator.dupe(u8, request.model orelse self.model);
         return .{
             .arena = arena,
@@ -295,24 +296,20 @@ pub const Client = struct {
 
     /// The caller owns result memory. Use an arena and release it as a group.
     /// Results never borrow the temporary request buffers or the client.
-    pub fn extractInto(self: *Client, comptime T: type, result_allocator: std.mem.Allocator, request: Request) !T {
-        return self.extractIntoWith(T, result_allocator, request, .{});
+    fn parseIntoRequest(self: *Client, comptime T: type, result_allocator: std.mem.Allocator, request: Request, comptime options: ParseOptions) !T {
+        return (try self.parseDetailedInto(T, result_allocator, request, options)).value;
     }
 
-    pub fn extractIntoWith(self: *Client, comptime T: type, result_allocator: std.mem.Allocator, request: Request, comptime options: ExtractionOptions) !T {
-        return (try self.extractDetailedInto(T, result_allocator, request, options)).value;
-    }
-
-    fn extractDetailedInto(self: *Client, comptime T: type, result_allocator: std.mem.Allocator, request: Request, comptime options: ExtractionOptions) !types.CreateResult(T) {
+    fn parseDetailedInto(self: *Client, comptime T: type, result_allocator: std.mem.Allocator, request: Request, comptime options: ParseOptions) !types.CreateResult(T) {
         self.clearLastError();
         var temporary = std.heap.ArenaAllocator.init(self.allocator);
         defer temporary.deinit();
         const allocator = temporary.allocator();
-        const messages = try self.prepare(allocator, request);
+        const conversation = try self.prepare(allocator, request);
         const model = request.model orelse self.model;
         return switch (self.backend) {
-            .openai => |*provider| core.createDetailedWithArena(T, allocator, result_allocator, provider, try openaiRequest(allocator, request, model, messages), null, self.hooks, extractionOptions(.openai, options)),
-            .anthropic => |*provider| core.createDetailedWithArena(T, allocator, result_allocator, provider, try anthropicRequest(allocator, request, model, messages), null, self.hooks, extractionOptions(.anthropic, options)),
+            .openai => |*provider| core.createDetailedWithArena(T, allocator, result_allocator, provider, try openaiRequest(allocator, request, model, conversation), null, self.hooks, extractionOptions(.openai, options)),
+            .anthropic => |*provider| core.createDetailedWithArena(T, allocator, result_allocator, provider, try anthropicRequest(allocator, request, model, conversation), null, self.hooks, extractionOptions(.anthropic, options)),
         };
     }
 
@@ -330,14 +327,83 @@ pub const Client = struct {
             if (std.meta.activeTag(self.backend) == .anthropic) return error.UnsupportedControl;
             if (!std.math.isFinite(temperature) or temperature < 0 or temperature > 2) return error.InvalidTemperature;
         }
-        const messages = try allocator.alloc(Message, request.messages.len + @intFromBool(request.prompt != null));
-        @memcpy(messages[0..request.messages.len], request.messages);
-        if (request.prompt) |prompt| messages[request.messages.len] = .{ .role = .user, .content = prompt };
-        return messages;
+        const conversation = try allocator.alloc(Message, request.messages.len + @intFromBool(request.prompt != null));
+        @memcpy(conversation[0..request.messages.len], request.messages);
+        if (request.prompt) |prompt| conversation[request.messages.len] = .{ .role = .user, .content = prompt };
+        return conversation;
     }
 };
 
-fn extractionOptions(comptime provider: Provider, comptime options: ExtractionOptions) options_mod.Options {
+const ResourceKind = enum { messages, responses };
+
+pub const MessageCreateParams = struct {
+    messages: []const Message,
+    model: ?[]const u8 = null,
+    max_tokens: ?u32 = null,
+    temperature: ?f64 = null,
+};
+
+/// Text input is supported here. Use Messages for a conversation history.
+pub const ResponseCreateParams = struct {
+    input: []const u8,
+    model: ?[]const u8 = null,
+    max_output_tokens: ?u32 = null,
+    temperature: ?f64 = null,
+};
+
+pub const Messages = Resource(.messages);
+pub const Responses = Resource(.responses);
+
+/// A resource borrows the client. Do not retain it across a client move or
+/// cleanup. Creating it on demand avoids a stored pointer into a movable owner.
+fn Resource(comptime kind: ResourceKind) type {
+    const Params = switch (kind) {
+        .messages => MessageCreateParams,
+        .responses => ResponseCreateParams,
+    };
+    return struct {
+        client: *Client,
+
+        pub fn create(self: @This(), params: Params) !Response {
+            return self.client.createRequest(normalize(params));
+        }
+
+        pub fn parse(self: @This(), comptime T: type, params: Params) !Owned(T) {
+            return self.parseWith(T, params, .{});
+        }
+
+        pub fn parseWith(self: @This(), comptime T: type, params: Params, comptime options: ParseOptions) !Owned(T) {
+            return self.client.parseRequest(T, normalize(params), options);
+        }
+
+        pub fn parseInto(self: @This(), comptime T: type, allocator: std.mem.Allocator, params: Params) !T {
+            return self.parseIntoWith(T, allocator, params, .{});
+        }
+
+        pub fn parseIntoWith(self: @This(), comptime T: type, allocator: std.mem.Allocator, params: Params, comptime options: ParseOptions) !T {
+            return self.client.parseIntoRequest(T, allocator, normalize(params), options);
+        }
+
+        fn normalize(params: Params) Request {
+            return switch (kind) {
+                .messages => .{
+                    .messages = params.messages,
+                    .model = params.model,
+                    .max_output_tokens = params.max_tokens,
+                    .temperature = params.temperature,
+                },
+                .responses => .{
+                    .prompt = params.input,
+                    .model = params.model,
+                    .max_output_tokens = params.max_output_tokens,
+                    .temperature = params.temperature,
+                },
+            };
+        }
+    };
+}
+
+fn extractionOptions(comptime provider: Provider, comptime options: ParseOptions) options_mod.Options {
     return .{
         .mode = options.mode,
         .max_retries = options.max_retries,

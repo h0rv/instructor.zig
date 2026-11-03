@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-Added a common `Client` for buffered text completion and typed extraction across the existing providers. It accepts an injectable HTTP transport and chooses provider schema defaults internally. Owned results have explicit cleanup and can outlive the client. Applications with a request arena can use `extractInto` instead.
+Added a common `Client` with `responses().create` and `responses().parse` for text input. Use `messages().create` and `messages().parse` for text conversations. Both views use the configured provider and endpoint through the same adapters. They do not change the HTTP endpoint or provide full native SDK coverage.
+
+Both views offer `parseWith` with compile-time `ParseOptions`. Applications with a request arena can use `parseInto` or `parseIntoWith`. Owned results have explicit cleanup and can outlive the client. The client accepts an injectable HTTP transport and chooses provider schema defaults internally. Existing low-level provider and `Session` APIs are unchanged.
 
 Added a bounded standard-library transport, an adapter for borrowed standard-library clients, and offline examples. Generated SDK files and dependency pins are unchanged. Streaming and Vertex support are not part of this first common API.
 

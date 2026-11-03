@@ -8,12 +8,15 @@ pub const ClientConfig = client.Config;
 pub const EnvConfig = client.EnvConfig;
 pub const Provider = client.Provider;
 pub const Backend = client.Backend;
-pub const Request = client.Request;
+pub const MessageCreateParams = client.MessageCreateParams;
+pub const ResponseCreateParams = client.ResponseCreateParams;
+pub const Messages = client.Messages;
+pub const Responses = client.Responses;
 pub const Message = client.Message;
 pub const Role = client.Role;
 pub const Response = client.Response;
 pub const Owned = client.Owned;
-pub const ExtractionOptions = client.ExtractionOptions;
+pub const ParseOptions = client.ParseOptions;
 
 pub const Mode = core.Mode;
 pub const Usage = core.Usage;

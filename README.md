@@ -11,7 +11,7 @@ Use the same `client.responses.parse` or `client.messages.parse` calls with Open
 Add the dependency:
 
 ```sh
-zig fetch --save=instructor git+https://github.com/h0rv/instructor.zig.git?ref=v0.3.0
+zig fetch --save=instructor 'git+https://github.com/h0rv/instructor.zig.git?ref=v0.3.0'
 ```
 
 Pin a commit for reproducible builds. Add the module in `build.zig`:

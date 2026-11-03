@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 Added a common `Client` with resource fields `client.responses.create` and `client.responses.parse` for text input. Use `client.messages.create` and `client.messages.parse` for text conversations. Both resources use the configured provider and endpoint through the same adapters. They do not change the HTTP endpoint or provide full native SDK coverage.
 
@@ -8,7 +8,7 @@ Both resources offer `parseWith` with compile-time `ParseOptions`. Applications 
 
 The client owns stable heap state. Resource handles borrow that state rather than a pointer to the outer client. They remain valid after moving the client, but must not outlive client cleanup. Do not copy an active client owner.
 
-Added `extra_body`, `extra_headers`, and `extra_query` to request parameters. Client configuration supports deeply copied defaults in `extra_body` and `extra_query`, alongside the existing copied `headers`. JSON objects merge recursively. Request query entries replace defaults by raw name and preserve repeated request names. Query components use RFC 3986 encoding. Request headers override defaults, including authentication and content type, without case-sensitive duplicates. Invalid headers return `error.InvalidHeader`.
+Added `extra_body`, `extra_headers`, and `extra_query` to request parameters. Client configuration supports deeply copied defaults in `extra_body` and `extra_query`, alongside the existing copied `headers`. JSON objects merge recursively. Request query entries replace defaults by raw name and preserve repeated request names. Query components use RFC 3986 encoding. Request headers override defaults, including authentication and content type, without case-sensitive duplicates. Invalid headers return `error.InvalidHeader`. HTTP owns body framing, so `Content-Length` and `Transfer-Encoding` overrides return `error.ReservedHeader`.
 
 All three HTTP adapters pass extra body fields through for ordinary and typed requests, including existing provider SDK paths. Unknown body keys are not silently dropped. Non-object extras return `error.InvalidExtraBody`. Routing and input fields remain protected with `error.ReservedBodyField`. Typed parsing also protects schema fields while allowing siblings such as `text.verbosity` and `output_config.effort`. `stream: true` or a non-boolean value returns `error.UnsupportedStreaming`. `stream: false` is allowed. Local validation and retries remain in place.
 

@@ -73,11 +73,33 @@ pub const StdHttp = struct {
         const client: *std.http.Client = @ptrCast(@alignCast(ctx.?));
         if (request.body != null and !request.method.requestHasBody())
             return error.InvalidRequestBody;
+        var automatic: std.http.Client.Request.Headers = .{};
+        for (request.headers) |header| {
+            try @import("request_options.zig").validateHeader(header);
+            inline for (.{
+                .{ "host", "Host" },
+                .{ "authorization", "Authorization" },
+                .{ "user_agent", "User-Agent" },
+                .{ "connection", "Connection" },
+                .{ "accept_encoding", "Accept-Encoding" },
+                .{ "content_type", "Content-Type" },
+            }) |names| {
+                if (std.ascii.eqlIgnoreCase(header.name, names[1])) @field(automatic, names[0]) = .omit;
+            }
+        }
         var req = try client.request(request.method, try std.Uri.parse(request.url), .{
+            .headers = automatic,
             .redirect_behavior = .unhandled,
             .extra_headers = request.headers,
         });
         defer req.deinit();
+        for (request.headers) |header| {
+            if (!std.ascii.eqlIgnoreCase(header.name, "connection")) continue;
+            var tokens = std.mem.tokenizeAny(u8, header.value, ", \t");
+            while (tokens.next()) |token| {
+                if (std.ascii.eqlIgnoreCase(token, "close")) req.keep_alive = false;
+            }
+        }
         // In particular, do not let Request.deinit drain an unbounded response
         // after an allocation failure before the body reader is initialized.
         errdefer if (req.connection) |connection| {
@@ -203,6 +225,7 @@ const Loopback = struct {
     method: std.http.Method = .GET,
     body: []const u8 = "",
     authorization: ?[]const u8 = null,
+    expected_headers: []const std.http.Header = &.{},
 
     fn init(responses: []const []const u8) !Loopback {
         const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
@@ -231,12 +254,20 @@ const Loopback = struct {
             try std.testing.expectEqualStrings(expected_line, (try input.interface.takeDelimiter('\n')) orelse return error.EndOfStream);
             var content_length: usize = 0;
             var found_auth = false;
+            var header_counts: [8]usize = @splat(0);
+            std.debug.assert(self.expected_headers.len <= header_counts.len);
             while (true) {
                 const line = (try input.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
                 if (std.mem.eql(u8, line, "\r")) break;
                 const colon = std.mem.findScalar(u8, line, ':') orelse return error.InvalidHeader;
                 const name = line[0..colon];
                 const value = std.mem.trim(u8, line[colon + 1 ..], " \r");
+                for (self.expected_headers, 0..) |expected, index| {
+                    if (std.ascii.eqlIgnoreCase(name, expected.name)) {
+                        try std.testing.expectEqualStrings(expected.value, value);
+                        header_counts[index] += 1;
+                    }
+                }
                 if (std.ascii.eqlIgnoreCase(name, "content-length"))
                     content_length = try std.fmt.parseInt(usize, value, 10);
                 if (std.ascii.eqlIgnoreCase(name, "authorization")) {
@@ -244,6 +275,7 @@ const Loopback = struct {
                     found_auth = true;
                 }
             }
+            for (header_counts[0..self.expected_headers.len]) |count| try std.testing.expectEqual(@as(usize, 1), count);
             try std.testing.expectEqual(self.authorization != null, found_auth);
             try std.testing.expectEqual(self.body.len, content_length);
             try std.testing.expectEqualStrings(self.body, try input.interface.take(content_length));
@@ -253,7 +285,7 @@ const Loopback = struct {
     }
 };
 
-test "default loopback forwards authorization and body and returns success and error bodies" {
+test "default loopback forwards unique overridden headers and body and returns success and error bodies" {
     var server = try Loopback.init(&.{
         "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
         "HTTP/1.1 400 Bad Request\r\nContent-Length: 7\r\n\r\ninvalid",
@@ -262,6 +294,13 @@ test "default loopback forwards authorization and body and returns success and e
     server.method = .POST;
     server.body = "{\"x\":1}";
     server.authorization = "Bearer local-test-secret";
+    server.expected_headers = &.{
+        .{ .name = "Authorization", .value = "Bearer local-test-secret" },
+        .{ .name = "User-Agent", .value = "instructor-test" },
+        .{ .name = "Host", .value = "custom.test" },
+        .{ .name = "Accept-Encoding", .value = "identity" },
+        .{ .name = "Connection", .value = "keep-alive" },
+    };
     var serving = try std.testing.io.concurrent(Loopback.serve, .{&server});
     defer serving.cancel(std.testing.io) catch {};
     var http = try StdHttp.init(std.testing.allocator, std.testing.io);
@@ -270,7 +309,7 @@ test "default loopback forwards authorization and body and returns success and e
     const request: Request = .{
         .method = .POST,
         .url = try server.url(&url_buffer),
-        .headers = &.{.{ .name = "Authorization", .value = "Bearer local-test-secret" }},
+        .headers = server.expected_headers,
         .body = server.body,
     };
     var success = try http.transport().send(std.testing.io, std.testing.allocator, request);

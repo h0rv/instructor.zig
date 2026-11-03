@@ -35,6 +35,8 @@ const Script = struct {
     auth_override: ?[]const u8 = null,
     expected_custom_header: ?[]const u8 = null,
     expected_max_tokens: ?u32 = null,
+    expected_url: ?[]const u8 = null,
+    inspect: ?*const fn (http.Request, std.json.Value) anyerror!void = null,
 
     fn transport(self: *Script) http.Transport {
         return .{ .ctx = self, .send_fn = send };
@@ -45,7 +47,9 @@ const Script = struct {
         if (self.calls >= self.replies.len) return error.UnexpectedRequest;
         const reply = self.replies[self.calls];
         try std.testing.expectEqual(std.http.Method.POST, request.method);
-        try std.testing.expect(std.mem.endsWith(u8, request.url, switch (self.case) {
+        const path_end = std.mem.indexOfAny(u8, request.url, "?#") orelse request.url.len;
+        if (self.expected_url) |expected| try std.testing.expectEqualStrings(expected, request.url);
+        try std.testing.expect(std.mem.endsWith(u8, request.url[0..path_end], switch (self.case) {
             .responses => "/responses",
             .chat => "/chat/completions",
             .anthropic => "/v1/messages",
@@ -73,6 +77,7 @@ const Script = struct {
         const parsed = try std.json.parseFromSlice(std.json.Value, allocator, request.body.?, .{});
         defer parsed.deinit();
         const root = parsed.value.object;
+        if (self.inspect) |inspect| try inspect(request, parsed.value);
         try std.testing.expectEqualStrings(self.expected_model, root.get("model").?.string);
         const format = switch (self.case) {
             .responses => if (root.get("text")) |text| text.object.get("format") else null,
@@ -119,12 +124,12 @@ test "one request API completes and extracts through all built-in adapters" {
         } };
         var client = try llm.Client.init(configFor(std.testing.allocator, &script));
         defer client.deinit();
-        var reply = try client.responses().create(.{ .input = "Say hello." });
+        var reply = try client.responses.create(.{ .input = "Say hello." });
         defer reply.deinit();
         try std.testing.expectEqualStrings("Hello", reply.text);
         try std.testing.expectEqual(@as(u64, 5), reply.usage.total_tokens);
 
-        var person = try client.responses().parse(Person, .{ .input = "Robby is 24." });
+        var person = try client.responses.parse(Person, .{ .input = "Robby is 24." });
         defer person.deinit();
         try std.testing.expectEqualStrings("Robby", person.value.name);
         try std.testing.expectEqual(@as(u8, 24), person.value.age);
@@ -141,14 +146,14 @@ test "Messages resource uses standard fields across every adapter" {
         } };
         var client = try llm.Client.init(configFor(std.testing.allocator, &script));
         defer client.deinit();
-        var reply = try client.messages().create(.{
+        var reply = try client.messages.create(.{
             .messages = &.{.{ .role = .user, .content = "Say hello." }},
             .max_tokens = 64,
         });
         defer reply.deinit();
         try std.testing.expectEqualStrings("Hello", reply.text);
 
-        var person = try client.messages().parse(Person, .{
+        var person = try client.messages.parse(Person, .{
             .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
             .max_tokens = 64,
         });
@@ -158,7 +163,7 @@ test "Messages resource uses standard fields across every adapter" {
 
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        const scoped_person = try client.messages().parseInto(Person, arena.allocator(), .{
+        const scoped_person = try client.messages.parseInto(Person, arena.allocator(), .{
             .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
             .max_tokens = 64,
         });
@@ -166,16 +171,17 @@ test "Messages resource uses standard fields across every adapter" {
     }
 }
 
-test "resource handles are created after moving the client and ad-hoc verbs are absent" {
+test "resource fields remain valid across client moves and ad-hoc verbs are absent" {
     try std.testing.expect(!@hasDecl(llm.Client, "text"));
     try std.testing.expect(!@hasDecl(llm.Client, "complete"));
     try std.testing.expect(!@hasDecl(llm.Client, "extract"));
     var script: Script = .{ .case = .responses, .replies = &.{.{ .body = bodyFor(.responses, "Hello") }} };
     var original = try llm.Client.init(configFor(std.testing.allocator, &script));
+    const saved_resource = original.responses;
     var moved = original;
     original = undefined;
     defer moved.deinit();
-    var reply = try moved.responses().create(.{ .input = "Hello" });
+    var reply = try saved_resource.create(.{ .input = "Hello" });
     defer reply.deinit();
     try std.testing.expectEqualStrings("Hello", reply.text);
 }
@@ -188,7 +194,7 @@ test "validation retries use the existing engine and keep cumulative usage" {
         } };
         var client = try llm.Client.init(configFor(std.testing.allocator, &script));
         defer client.deinit();
-        var person = try client.responses().parse(Person, .{ .input = "Robby is 24." });
+        var person = try client.responses.parse(Person, .{ .input = "Robby is 24." });
         defer person.deinit();
         try std.testing.expectEqual(@as(u8, 24), person.value.age);
         try std.testing.expectEqual(@as(u64, 10), person.usage.total_tokens);
@@ -200,14 +206,14 @@ fn extractAfterClientDies(allocator: std.mem.Allocator) !llm.Owned(Person) {
     var script: Script = .{ .case = .anthropic, .replies = &.{.{ .body = bodyFor(.anthropic, person_json), .structured = true }} };
     var client = try llm.Client.init(configFor(allocator, &script));
     defer client.deinit();
-    return client.responses().parse(Person, .{ .input = "Robby is 24." });
+    return client.responses.parse(Person, .{ .input = "Robby is 24." });
 }
 
 fn completeAfterClientDies(allocator: std.mem.Allocator) !llm.Response {
     var script: Script = .{ .case = .responses, .replies = &.{.{ .body = bodyFor(.responses, "Hello") }} };
     var client = try llm.Client.init(configFor(allocator, &script));
     defer client.deinit();
-    return client.responses().create(.{ .input = "Say hello." });
+    return client.responses.create(.{ .input = "Say hello." });
 }
 
 test "owned results move and outlive clients including model and raw response strings" {
@@ -234,7 +240,7 @@ test "caller arena results retain copied text even with allocate if needed" {
     const saved = blk: {
         var client = try llm.Client.init(configFor(std.testing.allocator, &script));
         defer client.deinit();
-        break :blk try client.responses().parseIntoWith(Person, arena.allocator(), .{ .input = "Robby is 24." }, .{
+        break :blk try client.responses.parseIntoWith(Person, arena.allocator(), .{ .input = "Robby is 24." }, .{
             .parse_options = .{ .allocate = .alloc_if_needed },
         });
     };
@@ -243,7 +249,7 @@ test "caller arena results retain copied text even with allocate if needed" {
     var owned_script: Script = .{ .case = .responses, .replies = &.{.{ .body = bodyFor(.responses, person_json), .structured = true }} };
     var client = try llm.Client.init(configFor(std.testing.allocator, &owned_script));
     defer client.deinit();
-    var person = try client.responses().parseWith(Person, .{ .input = "Robby is 24." }, .{ .parse_options = .{ .allocate = .alloc_if_needed } });
+    var person = try client.responses.parseWith(Person, .{ .input = "Robby is 24." }, .{ .parse_options = .{ .allocate = .alloc_if_needed } });
     defer person.deinit();
     try std.testing.expectEqualStrings("Robby", person.value.name);
 }
@@ -259,9 +265,9 @@ test "configuration strings are copied and per-call model overrides are owned" {
     defer client.deinit();
     @memset(&key, 'x');
     @memset(&model, 'x');
-    try std.testing.expectEqualStrings("test-model", client.model);
+    try std.testing.expectEqualStrings("test-model", client._state.model);
     var override = "override-model".*;
-    var response = try client.responses().create(.{ .input = "Hello", .model = &override });
+    var response = try client.responses.create(.{ .input = "Hello", .model = &override });
     defer response.deinit();
     @memset(&override, 'x');
     try std.testing.expectEqualStrings("override-model", response.model);
@@ -271,10 +277,10 @@ test "input validation and unsupported controls fail without invoking transport"
     var script: Script = .{ .case = .anthropic, .replies = &.{} };
     var client = try llm.Client.init(configFor(std.testing.allocator, &script));
     defer client.deinit();
-    try std.testing.expectError(error.MissingInput, client.messages().create(.{ .messages = &.{} }));
-    try std.testing.expectError(error.UnsupportedControl, client.responses().create(.{ .input = "Hello", .temperature = 0.5 }));
-    try std.testing.expectError(error.InvalidMaxOutputTokens, client.responses().create(.{ .input = "Hello", .max_output_tokens = 0 }));
-    try std.testing.expectError(error.MissingModel, client.responses().create(.{ .input = "Hello", .model = "" }));
+    try std.testing.expectError(error.MissingInput, client.messages.create(.{ .messages = &.{} }));
+    try std.testing.expectError(error.UnsupportedControl, client.responses.create(.{ .input = "Hello", .temperature = 0.5 }));
+    try std.testing.expectError(error.InvalidMaxOutputTokens, client.responses.create(.{ .input = "Hello", .max_output_tokens = 0 }));
+    try std.testing.expectError(error.MissingModel, client.responses.create(.{ .input = "Hello", .model = "" }));
     try std.testing.expectEqual(@as(usize, 0), script.calls);
 }
 
@@ -282,7 +288,7 @@ test "message history is forwarded and failed requests retain diagnostics" {
     var script: Script = .{ .case = .chat, .replies = &.{.{ .body = "{\"error\":{\"message\":\"denied\"}}", .status = .forbidden, .message_count = 2 }} };
     var client = try llm.Client.init(configFor(std.testing.allocator, &script));
     defer client.deinit();
-    try std.testing.expectError(error.ProviderHttpError, client.messages().create(.{
+    try std.testing.expectError(error.ProviderHttpError, client.messages.create(.{
         .messages = &.{
             .{ .role = .assistant, .content = "Earlier reply" },
             .{ .role = .user, .content = "Continue" },
@@ -290,7 +296,7 @@ test "message history is forwarded and failed requests retain diagnostics" {
     }));
     try std.testing.expectEqual(std.http.Status.forbidden, client.diagnostic().status.?);
     try std.testing.expect(client.diagnostic().body != null);
-    try std.testing.expectError(error.MissingInput, client.messages().create(.{ .messages = &.{} }));
+    try std.testing.expectError(error.MissingInput, client.messages.create(.{ .messages = &.{} }));
     try std.testing.expect(client.diagnostic().status == null);
 }
 
@@ -307,7 +313,7 @@ test "custom headers are copied and canonical authentication is not duplicated" 
     var client = try llm.Client.init(config);
     defer client.deinit();
     @memset(&header_value, 'x');
-    var response = try client.responses().create(.{ .input = "Hello" });
+    var response = try client.responses.create(.{ .input = "Hello" });
     defer response.deinit();
 }
 
@@ -319,7 +325,7 @@ test "local compatible endpoints can omit authentication or supply an explicit h
         if (custom_auth) config.headers = &.{.{ .name = "Authorization", .value = "Bearer external" }};
         var client = try llm.Client.init(config);
         defer client.deinit();
-        var response = try client.responses().create(.{ .input = "Hello" });
+        var response = try client.responses.create(.{ .input = "Hello" });
         defer response.deinit();
     }
 }
@@ -344,7 +350,7 @@ test "custom JSON parsers receive a stable allocator after the result moves" {
     var original = blk: {
         var client = try llm.Client.init(configFor(std.testing.allocator, &script));
         defer client.deinit();
-        break :blk try client.responses().parse(RetainsAllocator, .{ .input = "Robby is 24." });
+        break :blk try client.responses.parse(RetainsAllocator, .{ .input = "Robby is 24." });
     };
     var moved = original;
     original = undefined;
@@ -355,19 +361,133 @@ test "custom JSON parsers receive a stable allocator after the result moves" {
     try std.testing.expectEqualStrings("Robby", moved.value.name);
 }
 
+fn inspectPassthrough(request: http.Request, value: std.json.Value) !void {
+    const root = value.object;
+    const metadata = root.get("metadata").?.object;
+    try std.testing.expectEqualStrings("copied", metadata.get("client").?.string);
+    try std.testing.expectEqualStrings("request", metadata.get("shared").?.string);
+    try std.testing.expect(root.get("new_option").?.bool);
+    try std.testing.expectEqualStrings("high", root.get("text").?.object.get("verbosity").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, request.body.?, "123456789012345678901234567890123456789") != null);
+}
+
+test "client defaults and request extras reach every adapter without losing schemas" {
+    inline for (cases) |case| {
+        var script: Script = .{
+            .case = case,
+            .expected_custom_header = "request",
+            .expected_url = (switch (case) {
+                .responses => "https://api.openai.com/v1/responses",
+                .chat => "https://api.openai.com/v1/chat/completions",
+                .anthropic => "https://api.anthropic.com/v1/messages",
+            }) ++ "?client-key=copied&shared=new%20%26%20yes&repeat=first&repeat=second",
+            .inspect = inspectPassthrough,
+            .replies = &.{
+                .{ .body = bodyFor(case, "Hello") },
+                .{ .body = bodyFor(case, person_json), .structured = true },
+            },
+        };
+        var query_name = "client-key".*;
+        var query_value = "copied".*;
+        var client = blk: {
+            const defaults = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+                \\{"metadata":{"client":"copied","shared":"default"},"big":123456789012345678901234567890123456789}
+            , .{ .parse_numbers = false });
+            defer defaults.deinit();
+            var config = configFor(std.testing.allocator, &script);
+            config.extra_body = defaults.value;
+            config.extra_query = &.{
+                .{ .name = &query_name, .value = &query_value },
+                .{ .name = "shared", .value = "default" },
+            };
+            config.headers = &.{.{ .name = "X-App", .value = "default" }};
+            break :blk try llm.Client.init(config);
+        };
+        defer client.deinit();
+        @memset(&query_name, 'x');
+        @memset(&query_value, 'x');
+
+        const extra = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+            \\{"metadata":{"shared":"request"},"new_option":true,"text":{"verbosity":"high"}}
+        , .{});
+        defer extra.deinit();
+        const headers: []const std.http.Header = &.{.{ .name = "x-app", .value = "request" }};
+        const query: []const llm.QueryParam = &.{
+            .{ .name = "shared", .value = "new & yes" },
+            .{ .name = "repeat", .value = "first" },
+            .{ .name = "repeat", .value = "second" },
+        };
+        var reply = try client.responses.create(.{
+            .input = "Hello",
+            .extra_body = extra.value,
+            .extra_headers = headers,
+            .extra_query = query,
+        });
+        defer reply.deinit();
+        var person = try client.messages.parse(Person, .{
+            .messages = &.{.{ .role = .user, .content = "Robby is 24." }},
+            .extra_body = extra.value,
+            .extra_headers = headers,
+            .extra_query = query,
+        });
+        defer person.deinit();
+        try std.testing.expectEqualStrings("Robby", person.value.name);
+        try std.testing.expectEqual(@as(usize, 2), script.calls);
+    }
+}
+
+test "request extras cannot replace routing or Instructor schemas or enable streaming" {
+    inline for (cases) |case| {
+        var script: Script = .{ .case = case, .replies = &.{} };
+        var client = try llm.Client.init(configFor(std.testing.allocator, &script));
+        defer client.deinit();
+        const routing = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"model\":\"other\"}", .{});
+        defer routing.deinit();
+        try std.testing.expectError(error.ReservedBodyField, client.responses.create(.{ .input = "Hello", .extra_body = routing.value }));
+        const schema = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, switch (case) {
+            .responses => "{\"text\":{\"format\":{\"type\":\"text\"}}}",
+            .chat => "{\"response_format\":{\"type\":\"text\"}}",
+            .anthropic => "{\"output_config\":{\"format\":{\"type\":\"text\"}}}",
+        }, .{});
+        defer schema.deinit();
+        try std.testing.expectError(error.ReservedBodyField, client.responses.parse(Person, .{ .input = "Robby is 24.", .extra_body = schema.value }));
+        const streaming = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"stream\":true}", .{});
+        defer streaming.deinit();
+        try std.testing.expectError(error.UnsupportedStreaming, client.responses.create(.{ .input = "Hello", .extra_body = streaming.value }));
+        try std.testing.expectError(error.InvalidExtraBody, client.responses.create(.{ .input = "Hello", .extra_body = .null }));
+        try std.testing.expectEqual(@as(usize, 0), script.calls);
+    }
+}
+
 fn exerciseOwnedCalls(allocator: std.mem.Allocator) !void {
     var script: Script = .{ .case = .responses, .replies = &.{
         .{ .body = bodyFor(.responses, "Hello") },
         .{ .body = bodyFor(.responses, person_json), .structured = true },
     } };
     script.expected_custom_header = "custom";
+    const defaults = try std.json.parseFromSlice(std.json.Value, allocator, "{\"metadata\":{\"source\":\"client\"}}", .{});
+    defer defaults.deinit();
+    const extra = try std.json.parseFromSlice(std.json.Value, allocator, "{\"metadata\":{\"request\":true}}", .{});
+    defer extra.deinit();
     var config = configFor(allocator, &script);
     config.headers = &.{.{ .name = "X-App", .value = "custom" }};
+    config.extra_body = defaults.value;
+    config.extra_query = &.{.{ .name = "route", .value = "default" }};
     var client = try llm.Client.init(config);
     defer client.deinit();
-    var response = try client.responses().create(.{ .input = "Say hello." });
+    var response = try client.responses.create(.{
+        .input = "Say hello.",
+        .extra_body = extra.value,
+        .extra_headers = &.{.{ .name = "x-app", .value = "custom" }},
+        .extra_query = &.{.{ .name = "route", .value = "request" }},
+    });
     defer response.deinit();
-    var person = try client.responses().parse(Person, .{ .input = "Robby is 24." });
+    var person = try client.responses.parse(Person, .{
+        .input = "Robby is 24.",
+        .extra_body = extra.value,
+        .extra_headers = &.{.{ .name = "x-app", .value = "custom" }},
+        .extra_query = &.{.{ .name = "route", .value = "request" }},
+    });
     defer person.deinit();
 }
 

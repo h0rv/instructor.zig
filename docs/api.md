@@ -1,8 +1,50 @@
-# Session and provider API
-
-These notes describe the retained lower-level API. For the common LLM client, see [the client guide](client.md).
+# Client, session, and provider API
 
 Target Zig version: `0.17.0` stable APIs.
+
+## Common client
+
+`instructor.Client` has resource fields `responses` and `messages`. Use them without resource parentheses:
+
+```zig
+var response = try client.responses.create(.{ .input = "Say hello." });
+defer response.deinit();
+
+var person = try client.responses.parse(Person, .{ .input = "Robby is 24." });
+defer person.deinit();
+
+const messages = [_]instructor.Message{
+    .{ .role = .user, .content = "Robby is 24." },
+};
+
+var reply = try client.messages.create(.{ .messages = &messages });
+defer reply.deinit();
+
+var parsed = try client.messages.parse(Person, .{ .messages = &messages });
+defer parsed.deinit();
+```
+
+The resource fields borrow stable heap state owned by the client. Moving the outer client does not invalidate resource handles. Do not copy an active client owner or use a handle after `client.deinit()`. Results may outlive the client if their backing allocator is still alive.
+
+`ResponseCreateParams` requires a text `input` and has optional `model`, `max_output_tokens`, and `temperature` fields. `MessageCreateParams` requires `messages` and has optional `model`, `max_tokens`, and `temperature` fields. Both also accept:
+
+```zig
+extra_body: ?std.json.Value = null,
+extra_headers: []const std.http.Header = &.{},
+extra_query: []const instructor.QueryParam = &.{},
+```
+
+`QueryParam` has `name: []const u8` and `value: []const u8`. `ClientConfig` and `EnvConfig` accept `extra_body` and `extra_query` with the same defaults. Their existing `headers` field supplies default headers. Initialization deeply copies the defaults. Request values are borrowed only during the call.
+
+Client and request JSON objects merge recursively. Request arrays and scalars replace existing values. Unknown body keys are passed through. Request query entries replace defaults by raw name, preserve repeated request names, and use RFC 3986 component encoding. Request headers override defaults, authentication, and content type case-insensitively without duplicate names.
+
+A non-object body returns `error.InvalidExtraBody`. Extras cannot override `model`, `input`, or `messages`. Parsing also protects `text.format`, `response_format`, `output_config.format`, `tools`, and `tool_choice`. These conflicts return `error.ReservedBodyField`. Siblings such as `text.verbosity` and `output_config.effort` remain allowed. An extra `stream` value of `true` or a non-boolean returns `error.UnsupportedStreaming`. `false` is allowed. Invalid headers return `error.InvalidHeader`.
+
+Both resources also offer `parseWith`, `parseInto`, and `parseIntoWith`. Parsing retains local validation and retries. See [the client guide](client.md) for ownership and parsing options, or [request extras](client.md#request-extras) for examples and full merge rules.
+
+## Retained lower-level API
+
+The remaining sections describe the existing `OpenAI`, `Anthropic`, and `Session` APIs. Request extras work across all three HTTP adapters for ordinary and typed requests, including provider SDK paths without an injected transport. Generated SDK files and dependency pins are unchanged.
 
 Status: v0 design. Parsed values are validated by default with `jsonschema.validateValue` for supported metadata.
 
@@ -544,6 +586,9 @@ pub const OpenAI = struct {
         messages: []const Message,
         temperature: ?f64 = null,
         max_output_tokens: ?u32 = null,
+        extra_body: ?std.json.Value = null,
+        extra_headers: []const std.http.Header = &.{},
+        extra_query: []const instructor.QueryParam = &.{},
     };
 
     pub const Message = struct {
@@ -641,7 +686,7 @@ pub const Error = error{
 };
 ```
 
-Provider adapters can return transport/provider-specific errors too.
+Provider adapters can return transport/provider-specific errors too. Request extras may return `InvalidExtraBody`, `ReservedBodyField`, `UnsupportedStreaming`, or `InvalidHeader` before sending a request. See [request extras](client.md#request-extras) for the validation rules.
 
 Zig errors have no payload, so providers expose diagnostics separately:
 

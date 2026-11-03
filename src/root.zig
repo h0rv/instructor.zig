@@ -13,6 +13,7 @@ pub const ResponseCreateParams = client.ResponseCreateParams;
 pub const Messages = client.Messages;
 pub const Responses = client.Responses;
 pub const Message = client.Message;
+pub const QueryParam = client.QueryParam;
 pub const Role = client.Role;
 pub const Response = client.Response;
 pub const Owned = client.Owned;

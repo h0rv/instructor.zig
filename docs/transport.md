@@ -16,6 +16,8 @@ pub const Transport = struct {
 
 `Request` contains `method`, `url`, `headers`, and an optional `body`. It also contains `max_response_bytes`. These values are borrowed only during `send_fn`. Copy anything your implementation needs to retain.
 
+Instructor merges request extras before calling the transport. The URL includes encoded query parameters. The headers include request overrides without case-insensitive duplicates. The body includes merged JSON fields. Custom transports should send those values without rebuilding the body from a fixed list of known fields. See [request extras](client.md#request-extras) for the merge and validation rules.
+
 `Response` contains an allocator, an HTTP status, and an owned `body`. Allocate the body with the allocator supplied to `send_fn`. Instructor releases that body with `Response.deinit`. Do not return borrowed buffers or static strings as the owned body.
 
 ## Ownership

@@ -2,7 +2,7 @@
 
 An LLM client with typed results for Zig 0.17.0.
 
-Use `responses()` for text input or `messages()` for conversations across OpenAI Responses, OpenAI-compatible Chat Completions, and Anthropic Messages. Both use the configured provider and endpoint. Choosing a view does not change the HTTP endpoint.
+Use `client.responses` for text input or `client.messages` for conversations across OpenAI Responses, OpenAI-compatible Chat Completions, and Anthropic Messages. Both use the configured provider and endpoint. Choosing a resource does not change the HTTP endpoint.
 
 The common `Client` API is unreleased. The existing `OpenAI`, `Anthropic`, and `Session` APIs remain available.
 
@@ -45,10 +45,10 @@ pub fn main(init: std.process.Init) !void {
     });
     defer ai.deinit();
 
-    var greeting = try ai.responses().create(.{ .input = "Say hello." });
+    var greeting = try ai.responses.create(.{ .input = "Say hello." });
     defer greeting.deinit();
 
-    var person = try ai.responses().parse(Person, .{ .input = "Robby is 24." });
+    var person = try ai.responses.parse(Person, .{ .input = "Robby is 24." });
     defer person.deinit();
 
     std.debug.print("{s}\n", .{greeting.text});
@@ -84,12 +84,12 @@ var ai = try instructor.Client.init(.{
 defer ai.deinit();
 ```
 
-Client configuration strings and additional `headers` are copied. Request inputs are borrowed only until the call returns.
+Client configuration strings and default `headers` are copied. Client defaults in `extra_body` and `extra_query` are deeply copied during initialization. Request values are borrowed only until the call returns.
 
-For a conversation, use `messages()`. It has the same `create` and `parse` methods:
+For a conversation, use `messages`. It has the same `create` and `parse` methods:
 
 ```zig
-var reply = try ai.messages().create(.{
+var reply = try ai.messages.create(.{
     .messages = &.{
         .{
             .role = .system,
@@ -105,9 +105,11 @@ var reply = try ai.messages().create(.{
 defer reply.deinit();
 ```
 
-`responses()` currently accepts only text in `input`. Its token limit is `max_output_tokens`. Each view is a borrowed handle created on the call. Keep the client alive while using it.
+`responses` currently accepts only text in `input`. Its token limit is `max_output_tokens`. The resource fields borrow stable heap state and remain valid when you move the outer client. They must not outlive `client.deinit()`. Do not copy an active client owner.
 
 Requests can override `model`. OpenAI requests also support `temperature`. The current Anthropic adapter rejects that control instead of silently ignoring it.
+
+For provider fields beyond the typed parameters, use `extra_body`, `extra_headers`, or `extra_query` on either resource. See [request extras](docs/client.md#request-extras) for merge rules and protected fields.
 
 ## Bring your own HTTP client
 
@@ -128,7 +130,7 @@ Without an injected transport, Instructor owns a pooled standard-library client.
 If your application already has a request arena, put results there:
 
 ```zig
-const person = try ai.responses().parseInto(Person, arena.allocator(), .{
+const person = try ai.responses.parseInto(Person, arena.allocator(), .{
     .input = "Robby is 24.",
 });
 ```
@@ -138,7 +140,7 @@ Here, `person` is a `Person` value and remains valid until you release the arena
 Use `parseWith` or `parseIntoWith` with compile-time `ParseOptions`:
 
 ```zig
-var person = try ai.responses().parseWith(Person, .{ .input = "Robby is 24." }, .{
+var person = try ai.responses.parseWith(Person, .{ .input = "Robby is 24." }, .{
     .max_retries = 1,
 });
 defer person.deinit();

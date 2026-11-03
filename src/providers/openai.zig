@@ -3,6 +3,8 @@ const openai = @import("openai");
 const types = @import("../core/types.zig");
 const Options = @import("../core/options.zig").Options;
 const http = @import("../transport.zig");
+const request_options = @import("../request_options.zig");
+pub const QueryParam = request_options.QueryParam;
 
 pub const api = openai;
 
@@ -55,6 +57,9 @@ pub const Client = struct {
         messages: []const Message,
         temperature: ?f64 = null,
         max_output_tokens: ?u32 = null,
+        extra_body: ?std.json.Value = null,
+        extra_headers: []const std.http.Header = &.{},
+        extra_query: []const QueryParam = &.{},
         owned_retry_messages: usize = 0,
 
         pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -152,8 +157,8 @@ pub const Client = struct {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         var raw = switch (self.endpoint) {
-            .responses => try dispatch(self, allocator, "/responses", try responsesBase(arena.allocator(), request)),
-            .chat_completions => try dispatch(self, allocator, "/chat/completions", try chatBase(arena.allocator(), request)),
+            .responses => try dispatch(self, allocator, "/responses", try responsesBase(arena.allocator(), request), request, false),
+            .chat_completions => try dispatch(self, allocator, "/chat/completions", try chatBase(arena.allocator(), request), request, false),
         };
         defer raw.deinit();
         return self.decodeCompletion(allocator, raw, true);
@@ -264,7 +269,7 @@ fn postResponses(
     defer parsed_schema.deinit();
 
     const body = try buildResponsesRequest(arena_allocator, request, schema, parsed_schema.value, mode);
-    return dispatch(client, allocator, "/responses", body);
+    return dispatch(client, allocator, "/responses", body, request, true);
 }
 
 fn postChatCompletions(
@@ -282,56 +287,48 @@ fn postChatCompletions(
     defer parsed_schema.deinit();
 
     const body = try buildChatCompletionsRequest(arena_allocator, request, schema, parsed_schema.value, mode);
-    return dispatch(client, allocator, "/chat/completions", body);
+    return dispatch(client, allocator, "/chat/completions", body, request, true);
 }
 
 /// Preserve the SDK dispatch (including observers) for existing low-level callers.
-fn dispatch(client: *Client, allocator: std.mem.Allocator, path: []const u8, body: anytype) !openai.RawResponse {
-    var headers: std.ArrayList(std.http.Header) = .empty;
-    defer headers.deinit(allocator);
-    try headers.appendSlice(allocator, client.sdk.default_headers);
-    if (client.http_referer) |value| try headers.append(allocator, .{ .name = "HTTP-Referer", .value = value });
-    if (client.app_name) |value| try headers.append(allocator, .{ .name = "X-Title", .value = value });
-
+fn dispatch(client: *Client, allocator: std.mem.Allocator, path: []const u8, body: anytype, request: Client.Request, structured: bool) !openai.RawResponse {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const merged = try request_options.mergePayload(scratch, body, request.extra_body, if (client.endpoint == .responses) .responses else .chat_completions, structured);
+    const payload = try std.json.Stringify.valueAlloc(scratch, merged, .{});
+    var defaults: std.ArrayList(std.http.Header) = .empty;
+    try defaults.appendSlice(scratch, client.sdk.default_headers);
+    if (client.http_referer) |value| try defaults.append(scratch, .{ .name = "HTTP-Referer", .value = value });
+    if (client.app_name) |value| try defaults.append(scratch, .{ .name = "X-Title", .value = value });
+    // The SDK raw helper does not add Bearer authentication itself.
+    if (client.sdk.api_key.len != 0) try defaults.append(scratch, .{ .name = "Authorization", .value = try scratch.print("Bearer {s}", .{client.sdk.api_key}) });
+    try defaults.appendSlice(scratch, &.{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept", .value = "application/json" },
+    });
+    if (client.sdk.organization) |value| try defaults.append(scratch, .{ .name = "OpenAI-Organization", .value = value });
+    if (client.sdk.project) |value| try defaults.append(scratch, .{ .name = "OpenAI-Project", .value = value });
+    const headers = try request_options.mergeHeaders(scratch, defaults.items, request.extra_headers);
+    const endpoint = try request_options.endpointUrl(scratch, client.sdk.base_url, path);
+    const url = try request_options.appendQuery(scratch, endpoint, request.extra_query);
     const transport = client.transport orelse {
+        // Pass final headers as SDK overrides so its automatic content type,
+        // accept and organization headers cannot create duplicate wire members.
         const previous_headers = client.sdk.default_headers;
-        client.sdk.default_headers = headers.items;
+        client.sdk.default_headers = &.{};
         defer client.sdk.default_headers = previous_headers;
-        return openai.postJsonRaw(&client.sdk, path, body);
+        return openai.requestRawWithExtraHeaders(&client.sdk, .POST, url, payload, headers);
     };
-
-    const bearer = if (client.sdk.api_key.len != 0) try allocator.print("Bearer {s}", .{client.sdk.api_key}) else null;
-    defer if (bearer) |value| allocator.free(value);
-    if (bearer) |value| try replaceHeader(allocator, &headers, "Authorization", value);
-    try replaceHeader(allocator, &headers, "Content-Type", "application/json");
-    try replaceHeader(allocator, &headers, "Accept", "application/json");
-    if (client.sdk.organization) |value| try replaceHeader(allocator, &headers, "OpenAI-Organization", value);
-    if (client.sdk.project) |value| try replaceHeader(allocator, &headers, "OpenAI-Project", value);
-    const url = try allocator.print("{s}{s}", .{ std.mem.trimEnd(u8, client.sdk.base_url, "/"), path });
-    defer allocator.free(url);
-    const payload = try std.json.Stringify.valueAlloc(allocator, body, .{ .emit_null_optional_fields = false });
-    defer allocator.free(payload);
     const response = try transport.send(client.sdk.io, allocator, .{
         .method = .POST,
         .url = url,
-        .headers = headers.items,
+        .headers = headers,
         .body = payload,
         .max_response_bytes = client.max_response_bytes,
     });
     // Transfer the owned body, without touching the borrowed transport context.
     return .{ .allocator = response.allocator, .status = response.status, .body = response.body };
-}
-
-fn replaceHeader(allocator: std.mem.Allocator, headers: *std.ArrayList(std.http.Header), name: []const u8, value: []const u8) !void {
-    var index: usize = 0;
-    while (index < headers.items.len) {
-        if (std.ascii.eqlIgnoreCase(headers.items[index].name, name)) {
-            _ = headers.orderedRemove(index);
-        } else {
-            index += 1;
-        }
-    }
-    try headers.append(allocator, .{ .name = name, .value = value });
 }
 
 fn responsesBase(allocator: std.mem.Allocator, request: Client.Request) !openai.CreateResponse {
@@ -1117,6 +1114,191 @@ test "build responses tool call request" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"extract_person\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"tool_choice\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"text\"") == null);
+}
+
+const ExtrasProbe = struct {
+    endpoint: Client.Endpoint,
+    structured: bool,
+    override_auth: bool = true,
+    calls: usize = 0,
+    failure: ?anyerror = null,
+
+    fn check(self: *@This(), url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) !void {
+        self.calls += 1;
+        const expected = if (self.endpoint == .responses)
+            "offline://openai/v1/responses?existing=1&a%26b=x%20y%2B%23&a%26b=two#fragment"
+        else
+            "offline://openai/v1/chat/completions?existing=1&a%26b=x%20y%2B%23&a%26b=two#fragment";
+        try std.testing.expectEqualStrings(expected, url);
+        var authorization: usize = 0;
+        var content_type: usize = 0;
+        var custom: usize = 0;
+        for (headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+                authorization += 1;
+                try std.testing.expectEqualStrings(if (self.override_auth) "aUtHoRiZaTiOn" else "Authorization", header.name);
+                try std.testing.expectEqualStrings(if (self.override_auth) "custom auth" else "Bearer secret", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
+                content_type += 1;
+                try std.testing.expectEqualStrings("cOnTeNt-TyPe", header.name);
+                try std.testing.expectEqualStrings("application/custom+json", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "x-extra")) {
+                custom += 1;
+                try std.testing.expectEqualStrings("new", header.value);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), authorization);
+        try std.testing.expectEqual(@as(usize, 1), content_type);
+        try std.testing.expectEqual(@as(usize, 1), custom);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, payload.?, .{ .parse_numbers = false, .duplicate_field_behavior = .@"error" });
+        defer parsed.deinit();
+        const body = parsed.value.object;
+        try std.testing.expectEqualStrings("test-model", body.get("model").?.string);
+        const nested = body.get("unknown").?.object;
+        try std.testing.expectEqualStrings("1.234567890123456789e100", nested.get("number").?.number_string);
+        try std.testing.expectEqualStrings("nested", nested.get("model").?.string);
+        try std.testing.expectEqualStrings("kept", nested.get("format").?.string);
+        try std.testing.expectEqualStrings("0.75", body.get("temperature").?.number_string);
+        try std.testing.expect(!body.get("stream").?.bool);
+        if (self.structured) {
+            if (self.endpoint == .responses) {
+                try std.testing.expect(body.get("text").?.object.contains("format"));
+                try std.testing.expectEqualStrings("low", body.get("text").?.object.get("verbosity").?.string);
+            } else try std.testing.expect(body.contains("response_format"));
+        }
+    }
+
+    fn observe(ctx: ?*anyopaque, _: std.http.Method, url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        self.check(url, headers, payload) catch |err| {
+            self.failure = err;
+        };
+    }
+
+    fn send(ctx: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, request: http.Request) !http.Response {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        try self.check(request.url, request.headers, request.body);
+        const response = if (self.endpoint == .responses) "{\"output_text\":\"ok\"}" else "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}";
+        return .{ .allocator = allocator, .status = .ok, .body = try allocator.dupe(u8, response) };
+    }
+};
+
+fn extrasExercise(allocator: std.mem.Allocator, endpoint: Client.Endpoint, comptime structured: bool, comptime legacy: bool, override_auth: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const extra = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(),
+        \\{"unknown":{"number":1.234567890123456789e100,"model":"nested","format":"kept"},"temperature":0.75,"text":{"verbosity":"low"},"stream":false}
+    , .{ .parse_numbers = false });
+    var probe: ExtrasProbe = .{ .endpoint = endpoint, .structured = structured, .override_auth = override_auth };
+    var client = Client.init(.{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .api_key = "secret",
+        .endpoint = endpoint,
+        .base_url = "offline://openai/v1/?existing=1#fragment",
+        .transport = if (legacy) null else .{ .ctx = &probe, .send_fn = ExtrasProbe.send },
+    });
+    defer client.deinit();
+    const defaults = [_]std.http.Header{
+        .{ .name = "X-Extra", .value = "old" },
+        .{ .name = "x-extra", .value = "stale duplicate" },
+        .{ .name = "Content-Type", .value = "stale" },
+    };
+    client.sdk.default_headers = &defaults;
+    if (legacy) client.sdk.http_observer = .{ .ctx = &probe, .onRequest = ExtrasProbe.observe, .onResponse = null, .onError = null };
+    var request = plain_request;
+    request.extra_body = extra;
+    const overrides = [_]std.http.Header{
+        .{ .name = "cOnTeNt-TyPe", .value = "application/custom+json" },
+        .{ .name = "x-EXTRA", .value = "new" },
+        .{ .name = "aUtHoRiZaTiOn", .value = "custom auth" },
+    };
+    request.extra_headers = overrides[0..if (override_auth) 3 else 2];
+    request.extra_query = &.{ .{ .name = "a&b", .value = "x y+#" }, .{ .name = "a&b", .value = "two" } };
+    const schema: types.StructuredSchema = .{ .name = "Test", .schema_json = "{\"type\":\"object\"}" };
+    if (legacy) {
+        const result = if (structured) client.completeStructured(allocator, request, schema, .{}) else client.completeText(allocator, request);
+        if (result) |value| {
+            var completion = value;
+            completion.deinit(allocator);
+            return error.ExpectedOfflineError;
+        } else |err| switch (err) {
+            error.UnsupportedUriScheme => {},
+            else => return err,
+        }
+        if (probe.failure) |err| return err;
+    } else {
+        var completion = if (structured) try client.completeStructured(allocator, request, schema, .{}) else try client.completeText(allocator, request);
+        defer completion.deinit(allocator);
+        try std.testing.expectEqualStrings("ok", completion.text);
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@intFromPtr(&defaults), @intFromPtr(client.sdk.default_headers.ptr));
+    try std.testing.expectEqualStrings("old", defaults[0].value);
+}
+
+test "openai extras pass through every injected and legacy observer completion path" {
+    inline for (.{ Client.Endpoint.responses, .chat_completions }) |endpoint| {
+        inline for (.{ false, true }) |structured| {
+            inline for (.{ false, true }) |legacy| {
+                try extrasExercise(std.testing.allocator, endpoint, structured, legacy, true);
+                try extrasExercise(std.testing.allocator, endpoint, structured, legacy, false);
+            }
+        }
+    }
+}
+
+test "openai extras reject envelope streaming schema collisions and header injection before dispatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const schema: types.StructuredSchema = .{ .name = "Test", .schema_json = "{\"type\":\"object\"}" };
+    inline for (.{ Client.Endpoint.responses, .chat_completions }) |endpoint| {
+        var script: ScriptedTransport = .{ .endpoint = endpoint, .response = "{}" };
+        var client = scriptedClient(&script);
+        defer client.deinit();
+        inline for (.{ "{\"model\":\"other\"}", "{\"input\":[]}", "{\"messages\":[]}" }) |json| {
+            var request = plain_request;
+            request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json, .{});
+            try std.testing.expectError(error.ReservedBodyField, client.completeText(std.testing.allocator, request));
+            try std.testing.expectError(error.ReservedBodyField, client.completeStructured(std.testing.allocator, request, schema, .{}));
+        }
+        inline for (.{
+            if (endpoint == .responses) "{\"text\":null}" else "{\"response_format\":null}",
+            if (endpoint == .responses) "{\"text\":{\"format\":{}}}" else "{\"response_format\":{}}",
+            "{\"tools\":[]}",
+            "{\"tool_choice\":null}",
+        }) |json| {
+            var request = plain_request;
+            request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json, .{});
+            try std.testing.expectError(error.ReservedBodyField, client.completeStructured(std.testing.allocator, request, schema, .{}));
+        }
+        inline for (.{ "{\"stream\":true}", "{\"stream\":0}" }) |json| {
+            var request = plain_request;
+            request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json, .{});
+            try std.testing.expectError(error.UnsupportedStreaming, client.completeText(std.testing.allocator, request));
+            try std.testing.expectError(error.UnsupportedStreaming, client.completeStructured(std.testing.allocator, request, schema, .{}));
+        }
+        var request = plain_request;
+        request.extra_headers = &.{.{ .name = "X-Header", .value = "bad\r\nInjected: true" }};
+        try std.testing.expectError(error.InvalidHeader, client.completeText(std.testing.allocator, request));
+        try std.testing.expectEqual(@as(usize, 0), script.calls);
+    }
+}
+
+test "openai extras clean up all injected and legacy allocation failures" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    inline for (.{ false, true }) |legacy| {
+        inline for (.{ false, true }) |structured| {
+            const Exercise = struct {
+                fn run(allocator: std.mem.Allocator) !void {
+                    try extrasExercise(allocator, .responses, structured, legacy, true);
+                }
+            };
+            try std.testing.checkAllAllocationFailures(no_resize.allocator(), Exercise.run, .{});
+        }
+    }
 }
 
 const ScriptedTransport = struct {

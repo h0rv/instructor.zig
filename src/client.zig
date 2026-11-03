@@ -6,6 +6,8 @@ const options_mod = @import("core/options.zig");
 const openai = @import("providers/openai.zig");
 const anthropic = @import("providers/anthropic.zig");
 const http = @import("transport.zig");
+const request_options = @import("request_options.zig");
+pub const QueryParam = request_options.QueryParam;
 
 pub const Provider = enum { openai, anthropic };
 pub const Role = enum { system, user, assistant };
@@ -22,6 +24,9 @@ const Request = struct {
     model: ?[]const u8 = null,
     max_output_tokens: ?u32 = null,
     temperature: ?f64 = null,
+    extra_body: ?std.json.Value = null,
+    extra_headers: []const std.http.Header = &.{},
+    extra_query: []const QueryParam = &.{},
 };
 
 pub const OpenAIConfig = struct {
@@ -47,6 +52,8 @@ pub const Config = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     provider: Backend,
+    extra_body: ?std.json.Value = null,
+    extra_query: []const QueryParam = &.{},
     /// Additional headers are copied during initialization.
     headers: []const std.http.Header = &.{},
     model: ?[]const u8 = null,
@@ -58,6 +65,8 @@ pub const Config = struct {
 
 pub const EnvConfig = struct {
     provider: Provider,
+    extra_body: ?std.json.Value = null,
+    extra_query: []const QueryParam = &.{},
     headers: []const std.http.Header = &.{},
     model: ?[]const u8 = null,
     base_url: ?[]const u8 = null,
@@ -119,6 +128,44 @@ const NativeBackend = union(Provider) {
 /// Configuration strings are copied. I/O and injected contexts are borrowed.
 /// Calls on a client are synchronous and must not run concurrently.
 pub const Client = struct {
+    _state: *State,
+    messages: Messages,
+    responses: Responses,
+
+    pub fn init(config: Config) !Client {
+        return wrap(try State.init(config));
+    }
+
+    pub fn fromEnv(init_context: std.process.Init, config: EnvConfig) !Client {
+        return wrap(try State.fromEnv(init_context, config));
+    }
+
+    fn wrap(value: State) !Client {
+        var state = value;
+        errdefer state.deinit();
+        const pointer = try state.allocator.create(State);
+        pointer.* = state;
+        return .{
+            ._state = pointer,
+            .messages = .{ .state = pointer },
+            .responses = .{ .state = pointer },
+        };
+    }
+
+    pub fn deinit(self: *Client) void {
+        const allocator = self._state.allocator;
+        self._state.deinit();
+        allocator.destroy(self._state);
+        self.* = undefined;
+    }
+
+    pub fn diagnostic(self: *const Client) types.Diagnostic {
+        return self._state.diagnostic();
+    }
+};
+
+// Resource fields refer to this stable allocation, never to the outer handle.
+const State = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     backend: NativeBackend,
@@ -126,8 +173,10 @@ pub const Client = struct {
     config_arena: *std.heap.ArenaAllocator,
     owned_transport: ?http.StdHttp,
     hooks: ?types.Hooks,
+    extra_body: ?std.json.Value,
+    extra_query: []const QueryParam,
 
-    pub fn init(config: Config) !Client {
+    pub fn init(config: Config) !State {
         const arena = try createArena(config.allocator);
         errdefer destroyArena(arena);
         const strings = arena.allocator();
@@ -151,6 +200,9 @@ pub const Client = struct {
         for (config.headers, headers) |header, *copy| {
             copy.* = .{ .name = try strings.dupe(u8, header.name), .value = try strings.dupe(u8, header.value) };
         }
+
+        const extra_body = try request_options.cloneExtraBody(strings, config.extra_body);
+        const extra_query = try request_options.cloneQuery(strings, config.extra_query);
 
         var backend: NativeBackend = switch (config.provider) {
             .openai => |provider| .{ .openai = openai.Client.init(.{
@@ -187,12 +239,14 @@ pub const Client = struct {
             .config_arena = arena,
             .owned_transport = owned_transport,
             .hooks = config.hooks,
+            .extra_body = extra_body,
+            .extra_query = extra_query,
         };
     }
 
     /// Reads only the supplied process environment, not hidden global state.
     /// Servers can use init with credentials supplied by their own application.
-    pub fn fromEnv(init_context: std.process.Init, config: EnvConfig) !Client {
+    pub fn fromEnv(init_context: std.process.Init, config: EnvConfig) !State {
         if (config.provider == .anthropic and config.endpoint != .responses) {
             return error.UnsupportedControl;
         }
@@ -218,13 +272,15 @@ pub const Client = struct {
             },
             .model = config.model,
             .headers = config.headers,
+            .extra_body = config.extra_body,
+            .extra_query = config.extra_query,
             .transport = config.transport,
             .max_response_bytes = config.max_response_bytes,
             .hooks = config.hooks,
         });
     }
 
-    pub fn deinit(self: *Client) void {
+    pub fn deinit(self: *State) void {
         switch (self.backend) {
             inline else => |*provider| provider.deinit(),
         }
@@ -233,27 +289,18 @@ pub const Client = struct {
         self.* = undefined;
     }
 
-    pub fn diagnostic(self: *const Client) types.Diagnostic {
+    pub fn diagnostic(self: *const State) types.Diagnostic {
         return switch (self.backend) {
             inline else => |*provider| provider.diagnostic(),
         };
     }
 
-    /// A borrowed conversation resource, independent of the configured wire API.
-    pub fn messages(self: *Client) Messages {
-        return .{ .client = self };
-    }
-
-    /// A borrowed Responses-style resource with a text input.
-    pub fn responses(self: *Client) Responses {
-        return .{ .client = self };
-    }
-
-    fn createRequest(self: *Client, request: Request) !Response {
+    fn createRequest(self: *State, input: Request) !Response {
         self.clearLastError();
         const arena = try createArena(self.allocator);
         errdefer destroyArena(arena);
         const allocator = arena.allocator();
+        const request = try self.withDefaults(allocator, input);
         const conversation = try self.prepare(allocator, request);
         const model = try allocator.dupe(u8, request.model orelse self.model);
 
@@ -276,7 +323,7 @@ pub const Client = struct {
         };
     }
 
-    fn parseRequest(self: *Client, comptime T: type, request: Request, comptime options: ParseOptions) !Owned(T) {
+    fn parseRequest(self: *State, comptime T: type, request: Request, comptime options: ParseOptions) !Owned(T) {
         self.clearLastError();
         const arena = try createArena(self.allocator);
         errdefer destroyArena(arena);
@@ -296,15 +343,16 @@ pub const Client = struct {
 
     /// The caller owns result memory. Use an arena and release it as a group.
     /// Results never borrow the temporary request buffers or the client.
-    fn parseIntoRequest(self: *Client, comptime T: type, result_allocator: std.mem.Allocator, request: Request, comptime options: ParseOptions) !T {
+    fn parseIntoRequest(self: *State, comptime T: type, result_allocator: std.mem.Allocator, request: Request, comptime options: ParseOptions) !T {
         return (try self.parseDetailedInto(T, result_allocator, request, options)).value;
     }
 
-    fn parseDetailedInto(self: *Client, comptime T: type, result_allocator: std.mem.Allocator, request: Request, comptime options: ParseOptions) !types.CreateResult(T) {
+    fn parseDetailedInto(self: *State, comptime T: type, result_allocator: std.mem.Allocator, input: Request, comptime options: ParseOptions) !types.CreateResult(T) {
         self.clearLastError();
         var temporary = std.heap.ArenaAllocator.init(self.allocator);
         defer temporary.deinit();
         const allocator = temporary.allocator();
+        const request = try self.withDefaults(allocator, input);
         const conversation = try self.prepare(allocator, request);
         const model = request.model orelse self.model;
         return switch (self.backend) {
@@ -313,13 +361,20 @@ pub const Client = struct {
         };
     }
 
-    fn clearLastError(self: *Client) void {
+    fn withDefaults(self: *const State, allocator: std.mem.Allocator, input: Request) !Request {
+        var request = input;
+        request.extra_body = try request_options.mergeExtraBody(allocator, self.extra_body, input.extra_body);
+        request.extra_query = try request_options.mergeQuery(allocator, self.extra_query, input.extra_query);
+        return request;
+    }
+
+    fn clearLastError(self: *State) void {
         switch (self.backend) {
             inline else => |*provider| provider.clearLastError(),
         }
     }
 
-    fn prepare(self: *const Client, allocator: std.mem.Allocator, request: Request) ![]const Message {
+    fn prepare(self: *const State, allocator: std.mem.Allocator, request: Request) ![]const Message {
         if ((request.model orelse self.model).len == 0) return error.MissingModel;
         if (request.messages.len == 0 and request.prompt == null) return error.MissingInput;
         if (request.max_output_tokens == 0) return error.InvalidMaxOutputTokens;
@@ -338,6 +393,9 @@ const ResourceKind = enum { messages, responses };
 
 pub const MessageCreateParams = struct {
     messages: []const Message,
+    extra_body: ?std.json.Value = null,
+    extra_headers: []const std.http.Header = &.{},
+    extra_query: []const QueryParam = &.{},
     model: ?[]const u8 = null,
     max_tokens: ?u32 = null,
     temperature: ?f64 = null,
@@ -346,6 +404,9 @@ pub const MessageCreateParams = struct {
 /// Text input is supported here. Use Messages for a conversation history.
 pub const ResponseCreateParams = struct {
     input: []const u8,
+    extra_body: ?std.json.Value = null,
+    extra_headers: []const std.http.Header = &.{},
+    extra_query: []const QueryParam = &.{},
     model: ?[]const u8 = null,
     max_output_tokens: ?u32 = null,
     temperature: ?f64 = null,
@@ -354,18 +415,18 @@ pub const ResponseCreateParams = struct {
 pub const Messages = Resource(.messages);
 pub const Responses = Resource(.responses);
 
-/// A resource borrows the client. Do not retain it across a client move or
-/// cleanup. Creating it on demand avoids a stored pointer into a movable owner.
+/// Resource fields borrow stable client state. Moving the outer client does not
+/// invalidate a resource. Resources must not outlive their client owner.
 fn Resource(comptime kind: ResourceKind) type {
     const Params = switch (kind) {
         .messages => MessageCreateParams,
         .responses => ResponseCreateParams,
     };
     return struct {
-        client: *Client,
+        state: *State,
 
         pub fn create(self: @This(), params: Params) !Response {
-            return self.client.createRequest(normalize(params));
+            return self.state.createRequest(normalize(params));
         }
 
         pub fn parse(self: @This(), comptime T: type, params: Params) !Owned(T) {
@@ -373,7 +434,7 @@ fn Resource(comptime kind: ResourceKind) type {
         }
 
         pub fn parseWith(self: @This(), comptime T: type, params: Params, comptime options: ParseOptions) !Owned(T) {
-            return self.client.parseRequest(T, normalize(params), options);
+            return self.state.parseRequest(T, normalize(params), options);
         }
 
         pub fn parseInto(self: @This(), comptime T: type, allocator: std.mem.Allocator, params: Params) !T {
@@ -381,7 +442,7 @@ fn Resource(comptime kind: ResourceKind) type {
         }
 
         pub fn parseIntoWith(self: @This(), comptime T: type, allocator: std.mem.Allocator, params: Params, comptime options: ParseOptions) !T {
-            return self.client.parseIntoRequest(T, allocator, normalize(params), options);
+            return self.state.parseIntoRequest(T, allocator, normalize(params), options);
         }
 
         fn normalize(params: Params) Request {
@@ -391,12 +452,18 @@ fn Resource(comptime kind: ResourceKind) type {
                     .model = params.model,
                     .max_output_tokens = params.max_tokens,
                     .temperature = params.temperature,
+                    .extra_body = params.extra_body,
+                    .extra_headers = params.extra_headers,
+                    .extra_query = params.extra_query,
                 },
                 .responses => .{
                     .prompt = params.input,
                     .model = params.model,
                     .max_output_tokens = params.max_output_tokens,
                     .temperature = params.temperature,
+                    .extra_body = params.extra_body,
+                    .extra_headers = params.extra_headers,
+                    .extra_query = params.extra_query,
                 },
             };
         }
@@ -425,7 +492,7 @@ fn openaiRequest(allocator: std.mem.Allocator, request: Request, model: []const 
             .assistant => .assistant,
         }, .content = message.content };
     }
-    return .{ .model = model, .messages = native, .temperature = request.temperature, .max_output_tokens = request.max_output_tokens };
+    return .{ .model = model, .messages = native, .temperature = request.temperature, .max_output_tokens = request.max_output_tokens, .extra_body = request.extra_body, .extra_headers = request.extra_headers, .extra_query = request.extra_query };
 }
 
 fn anthropicRequest(allocator: std.mem.Allocator, request: Request, model: []const u8, messages: []const Message) !anthropic.Client.Request {
@@ -437,7 +504,7 @@ fn anthropicRequest(allocator: std.mem.Allocator, request: Request, model: []con
             .assistant => .assistant,
         }, .content = message.content };
     }
-    return .{ .model = model, .messages = native, .max_tokens = request.max_output_tokens };
+    return .{ .model = model, .messages = native, .max_tokens = request.max_output_tokens, .extra_body = request.extra_body, .extra_headers = request.extra_headers, .extra_query = request.extra_query };
 }
 
 fn createArena(allocator: std.mem.Allocator) !*std.heap.ArenaAllocator {

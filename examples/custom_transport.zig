@@ -33,10 +33,10 @@ pub fn main(init: std.process.Init) !void {
     });
     defer ai.deinit();
 
-    var greeting = try ai.responses().create(.{ .input = "Say hello." });
+    var greeting = try ai.responses.create(.{ .input = "Say hello." });
     defer greeting.deinit();
 
-    var person = try ai.responses().parse(Person, .{ .input = "Robby is 24." });
+    var person = try ai.responses.parse(Person, .{ .input = "Robby is 24." });
     defer person.deinit();
 
     std.debug.print("{s}\n{s}: {}\n", .{ greeting.text, person.value.name, person.value.age });

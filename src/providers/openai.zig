@@ -2,6 +2,9 @@ const std = @import("std");
 const openai = @import("openai");
 const types = @import("../core/types.zig");
 const Options = @import("../core/options.zig").Options;
+const http = @import("../transport.zig");
+const request_options = @import("../request_options.zig");
+pub const QueryParam = request_options.QueryParam;
 
 pub const api = openai;
 
@@ -14,6 +17,8 @@ pub const Client = struct {
     endpoint: Endpoint = .responses,
     http_referer: ?[]const u8 = null,
     app_name: ?[]const u8 = null,
+    transport: ?http.Transport = null,
+    max_response_bytes: usize = 8 * 1024 * 1024,
     last_status: ?std.http.Status = null,
     last_error_body: ?[]u8 = null,
 
@@ -27,6 +32,8 @@ pub const Client = struct {
         MissingOutputText,
         InvalidProviderResponse,
         UnsupportedMode,
+        Refusal,
+        IncompleteResponse,
     };
 
     pub const Config = struct {
@@ -41,6 +48,8 @@ pub const Client = struct {
         http_referer: ?[]const u8 = null,
         /// Optional OpenRouter ranking header.
         app_name: ?[]const u8 = null,
+        transport: ?http.Transport = null,
+        max_response_bytes: usize = 8 * 1024 * 1024,
     };
 
     pub const Request = struct {
@@ -48,6 +57,9 @@ pub const Client = struct {
         messages: []const Message,
         temperature: ?f64 = null,
         max_output_tokens: ?u32 = null,
+        extra_body: ?std.json.Value = null,
+        extra_headers: []const std.http.Header = &.{},
+        extra_query: []const QueryParam = &.{},
         owned_retry_messages: usize = 0,
 
         pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -89,6 +101,8 @@ pub const Client = struct {
             .endpoint = config.endpoint,
             .http_referer = config.http_referer,
             .app_name = config.app_name,
+            .transport = config.transport,
+            .max_response_bytes = config.max_response_bytes,
         };
     }
 
@@ -129,46 +143,54 @@ pub const Client = struct {
         self.clearLastError();
         if (!modeSupported(self.endpoint, options.mode)) return Error.UnsupportedMode;
 
-        var default_headers_buf: [2]std.http.Header = undefined;
-        var default_headers_len: usize = 0;
-        if (self.http_referer) |http_referer| {
-            default_headers_buf[default_headers_len] = .{ .name = "HTTP-Referer", .value = http_referer };
-            default_headers_len += 1;
-        }
-        if (self.app_name) |app_name| {
-            default_headers_buf[default_headers_len] = .{ .name = "X-Title", .value = app_name };
-            default_headers_len += 1;
-        }
-        const previous_headers = self.sdk.default_headers;
-        self.sdk.default_headers = default_headers_buf[0..default_headers_len];
-        defer self.sdk.default_headers = previous_headers;
-
         var raw = switch (self.endpoint) {
             .responses => try postResponses(self, allocator, request, schema, options.mode),
             .chat_completions => try postChatCompletions(self, allocator, request, schema, options.mode),
         };
         defer raw.deinit();
+        return self.decodeCompletion(allocator, raw, false);
+    }
 
-        if (raw.status.class() != .success or try hasProviderError(allocator, raw.body)) {
+    /// Ordinary completion without a schema, response format, or tools.
+    pub fn completeText(self: *Client, allocator: std.mem.Allocator, request: Request) !types.Completion {
+        self.clearLastError();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        var raw = switch (self.endpoint) {
+            .responses => try dispatch(self, allocator, "/responses", try responsesBase(arena.allocator(), request), request, false),
+            .chat_completions => try dispatch(self, allocator, "/chat/completions", try chatBase(arena.allocator(), request), request, false),
+        };
+        defer raw.deinit();
+        return self.decodeCompletion(allocator, raw, true);
+    }
+
+    fn decodeCompletion(self: *Client, allocator: std.mem.Allocator, raw: openai.RawResponse, ordinary: bool) !types.Completion {
+        return self.decodeCompletionInner(allocator, raw, ordinary) catch |err| {
+            if (err == error.OutOfMemory) return err;
             self.last_status = raw.status;
             self.last_error_body = try self.allocator.dupe(u8, raw.body);
+            return err;
+        };
+    }
+
+    fn decodeCompletionInner(self: *Client, allocator: std.mem.Allocator, raw: openai.RawResponse, ordinary: bool) !types.Completion {
+        if (raw.status.class() != .success or try hasProviderError(allocator, raw.body)) {
             return Error.ProviderHttpError;
         }
 
         const raw_response = try allocator.dupe(u8, raw.body);
         errdefer allocator.free(raw_response);
 
-        const text = extractOutputText(allocator, raw_response) catch |err| {
-            self.last_status = raw.status;
-            self.last_error_body = try self.allocator.dupe(u8, raw_response);
-            return err;
-        };
+        const text = if (ordinary)
+            try extractOrdinaryText(allocator, raw_response, self.endpoint)
+        else
+            try extractOutputText(allocator, raw_response);
         errdefer allocator.free(text);
 
         return .{
             .text = text,
             .raw_response = raw_response,
-            .usage = extractUsage(allocator, raw_response) catch .{},
+            .usage = try extractUsage(allocator, raw_response),
         };
     }
 
@@ -247,7 +269,7 @@ fn postResponses(
     defer parsed_schema.deinit();
 
     const body = try buildResponsesRequest(arena_allocator, request, schema, parsed_schema.value, mode);
-    return openai.postJsonRaw(&client.sdk, "/responses", body);
+    return dispatch(client, allocator, "/responses", body, request, true);
 }
 
 fn postChatCompletions(
@@ -265,7 +287,66 @@ fn postChatCompletions(
     defer parsed_schema.deinit();
 
     const body = try buildChatCompletionsRequest(arena_allocator, request, schema, parsed_schema.value, mode);
-    return openai.postJsonRaw(&client.sdk, "/chat/completions", body);
+    return dispatch(client, allocator, "/chat/completions", body, request, true);
+}
+
+/// Preserve the SDK dispatch (including observers) for existing low-level callers.
+fn dispatch(client: *Client, allocator: std.mem.Allocator, path: []const u8, body: anytype, request: Client.Request, structured: bool) !openai.RawResponse {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const merged = try request_options.mergePayload(scratch, body, request.extra_body, if (client.endpoint == .responses) .responses else .chat_completions, structured);
+    const payload = try std.json.Stringify.valueAlloc(scratch, merged, .{});
+    var defaults: std.ArrayList(std.http.Header) = .empty;
+    try defaults.appendSlice(scratch, client.sdk.default_headers);
+    if (client.http_referer) |value| try defaults.append(scratch, .{ .name = "HTTP-Referer", .value = value });
+    if (client.app_name) |value| try defaults.append(scratch, .{ .name = "X-Title", .value = value });
+    // The SDK raw helper does not add Bearer authentication itself.
+    if (client.sdk.api_key.len != 0) try defaults.append(scratch, .{ .name = "Authorization", .value = try scratch.print("Bearer {s}", .{client.sdk.api_key}) });
+    try defaults.appendSlice(scratch, &.{
+        .{ .name = "Content-Type", .value = "application/json" },
+        .{ .name = "Accept", .value = "application/json" },
+    });
+    if (client.sdk.organization) |value| try defaults.append(scratch, .{ .name = "OpenAI-Organization", .value = value });
+    if (client.sdk.project) |value| try defaults.append(scratch, .{ .name = "OpenAI-Project", .value = value });
+    const headers = try request_options.mergeHeaders(scratch, defaults.items, request.extra_headers);
+    const endpoint = try request_options.endpointUrl(scratch, client.sdk.base_url, path);
+    const url = try request_options.appendQuery(scratch, endpoint, request.extra_query);
+    const transport = client.transport orelse {
+        // Pass final headers as SDK overrides so its automatic content type,
+        // accept and organization headers cannot create duplicate wire members.
+        const previous_headers = client.sdk.default_headers;
+        client.sdk.default_headers = &.{};
+        defer client.sdk.default_headers = previous_headers;
+        return openai.requestRawWithExtraHeaders(&client.sdk, .POST, url, payload, headers);
+    };
+    const response = try transport.send(client.sdk.io, allocator, .{
+        .method = .POST,
+        .url = url,
+        .headers = headers,
+        .body = payload,
+        .max_response_bytes = client.max_response_bytes,
+    });
+    // Transfer the owned body, without touching the borrowed transport context.
+    return .{ .allocator = response.allocator, .status = response.status, .body = response.body };
+}
+
+fn responsesBase(allocator: std.mem.Allocator, request: Client.Request) !openai.CreateResponse {
+    return .{
+        .model = request.model,
+        .input = .{ .input_item_list = try inputItems(allocator, request.messages) },
+        .temperature = request.temperature,
+        .max_output_tokens = if (request.max_output_tokens) |value| @as(?i64, @intCast(value)) else null,
+    };
+}
+
+fn chatBase(allocator: std.mem.Allocator, request: Client.Request) !openai.CreateChatCompletionRequest {
+    return .{
+        .model = request.model,
+        .messages = try messagesSlice(allocator, request.messages),
+        .temperature = request.temperature,
+        .max_tokens = if (request.max_output_tokens) |value| @intCast(value) else null,
+    };
 }
 
 fn parseSchemaValue(allocator: std.mem.Allocator, schema_json: []const u8) !std.json.Parsed(std.json.Value) {
@@ -281,12 +362,7 @@ fn buildResponsesRequest(
     schema_value: std.json.Value,
     mode: types.Mode,
 ) !openai.CreateResponse {
-    var body: openai.CreateResponse = .{
-        .model = request.model,
-        .input = .{ .input_item_list = try inputItems(allocator, request.messages) },
-        .temperature = request.temperature,
-        .max_output_tokens = if (request.max_output_tokens) |value| @as(?i64, @intCast(value)) else null,
-    };
+    var body = try responsesBase(allocator, request);
 
     switch (mode) {
         .json_schema => body.text = .{ .format = try responsesFormat(allocator, schema, schema_value) },
@@ -310,12 +386,7 @@ fn buildChatCompletionsRequest(
     schema_value: std.json.Value,
     mode: types.Mode,
 ) !openai.CreateChatCompletionRequest {
-    var body: openai.CreateChatCompletionRequest = .{
-        .model = request.model,
-        .messages = try messagesSlice(allocator, request.messages),
-        .temperature = request.temperature,
-        .max_tokens = if (request.max_output_tokens) |value| @intCast(value) else null,
-    };
+    var body = try chatBase(allocator, request);
 
     switch (mode) {
         .json_schema => body.response_format = try chatResponseFormat(allocator, schema, schema_value),
@@ -339,7 +410,9 @@ fn hasProviderError(allocator: std.mem.Allocator, raw_response: []const u8) !boo
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw_response, .{});
     defer parsed.deinit();
 
-    return parsed.value == .object and parsed.value.object.get("error") != null;
+    if (parsed.value != .object) return false;
+    const provider_error = parsed.value.object.get("error") orelse return false;
+    return provider_error != .null;
 }
 
 fn extractOutputText(allocator: std.mem.Allocator, raw_response: []const u8) ![]u8 {
@@ -348,6 +421,102 @@ fn extractOutputText(allocator: std.mem.Allocator, raw_response: []const u8) ![]
 
     const text = findOutputText(parsed.value) orelse return Client.Error.MissingOutputText;
     return allocator.dupe(u8, text);
+}
+
+fn isString(value: ?std.json.Value, expected: []const u8) bool {
+    const v = value orelse return false;
+    return v == .string and std.mem.eql(u8, v.string, expected);
+}
+
+fn checkTextStatus(value: std.json.Value) !void {
+    if (value != .object) return Client.Error.InvalidProviderResponse;
+    if (value.object.get("refusal")) |refusal| {
+        if (refusal != .null) return Client.Error.Refusal;
+    }
+    if (isString(value.object.get("type"), "refusal")) return Client.Error.Refusal;
+    if (value.object.get("status")) |status| {
+        if (!isString(status, "completed")) return Client.Error.IncompleteResponse;
+    }
+    if (value.object.get("incomplete_details")) |details| {
+        if (details != .null) return Client.Error.IncompleteResponse;
+    }
+}
+
+/// Unlike extraction, ordinary text never falls back to function arguments.
+fn extractOrdinaryText(allocator: std.mem.Allocator, raw_response: []const u8, endpoint: Client.Endpoint) ![]u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw_response, .{});
+    defer parsed.deinit();
+    const root = parsed.value;
+    try checkTextStatus(root);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(allocator);
+    var found = false;
+    switch (endpoint) {
+        .responses => {
+            if (root.object.get("output")) |output| {
+                if (output != .array) return Client.Error.InvalidProviderResponse;
+                for (output.array.items) |item| {
+                    try checkTextStatus(item);
+                    // Reasoning and tool items are not ordinary output text.
+                    if (item.object.get("type")) |kind| {
+                        if (!isString(kind, "message")) continue;
+                    }
+                    if (item.object.get("content")) |content| {
+                        try appendTextContent(allocator, &text, &found, content);
+                    }
+                }
+            }
+            if (!found) {
+                if (root.object.get("output_text")) |output_text| {
+                    if (output_text != .string) return Client.Error.InvalidProviderResponse;
+                    try text.appendSlice(allocator, output_text.string);
+                    found = true;
+                }
+            }
+        },
+        .chat_completions => {
+            const choices = root.object.get("choices") orelse return Client.Error.MissingOutputText;
+            if (choices != .array or choices.array.items.len == 0) return Client.Error.MissingOutputText;
+            const choice = choices.array.items[0];
+            try checkTextStatus(choice);
+            if (choice.object.get("finish_reason")) |reason| {
+                if (isString(reason, "content_filter")) return Client.Error.Refusal;
+                if (!isString(reason, "stop")) return Client.Error.IncompleteResponse;
+            }
+            if (choice.object.get("message")) |message| {
+                try checkTextStatus(message);
+                if (message.object.get("content")) |content| {
+                    try appendTextContent(allocator, &text, &found, content);
+                }
+            } else if (choice.object.get("text")) |content| {
+                try appendTextContent(allocator, &text, &found, content);
+            }
+        },
+    }
+    if (!found) return Client.Error.MissingOutputText;
+    return text.toOwnedSlice(allocator);
+}
+
+fn appendTextContent(allocator: std.mem.Allocator, text: *std.ArrayList(u8), found: *bool, content: std.json.Value) !void {
+    switch (content) {
+        .string => |value| {
+            try text.appendSlice(allocator, value);
+            found.* = true;
+        },
+        .array => |parts| for (parts.items) |part| {
+            try checkTextStatus(part);
+            if (part.object.get("type")) |kind| {
+                if (!isString(kind, "text") and !isString(kind, "output_text")) continue;
+            }
+            if (part.object.get("text")) |value| {
+                if (value != .string) return Client.Error.InvalidProviderResponse;
+                try text.appendSlice(allocator, value.string);
+                found.* = true;
+            }
+        },
+        .null => {},
+        else => return Client.Error.InvalidProviderResponse,
+    }
 }
 
 fn extractUsage(allocator: std.mem.Allocator, raw_response: []const u8) !types.Usage {
@@ -945,6 +1114,390 @@ test "build responses tool call request" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"extract_person\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"tool_choice\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"text\"") == null);
+}
+
+const ExtrasProbe = struct {
+    endpoint: Client.Endpoint,
+    structured: bool,
+    override_auth: bool = true,
+    calls: usize = 0,
+    failure: ?anyerror = null,
+
+    fn check(self: *@This(), url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) !void {
+        self.calls += 1;
+        const expected = if (self.endpoint == .responses)
+            "offline://openai/v1/responses?existing=1&a%26b=x%20y%2B%23&a%26b=two#fragment"
+        else
+            "offline://openai/v1/chat/completions?existing=1&a%26b=x%20y%2B%23&a%26b=two#fragment";
+        try std.testing.expectEqualStrings(expected, url);
+        var authorization: usize = 0;
+        var content_type: usize = 0;
+        var custom: usize = 0;
+        for (headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "authorization")) {
+                authorization += 1;
+                try std.testing.expectEqualStrings(if (self.override_auth) "aUtHoRiZaTiOn" else "Authorization", header.name);
+                try std.testing.expectEqualStrings(if (self.override_auth) "custom auth" else "Bearer secret", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
+                content_type += 1;
+                try std.testing.expectEqualStrings("cOnTeNt-TyPe", header.name);
+                try std.testing.expectEqualStrings("application/custom+json", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "x-extra")) {
+                custom += 1;
+                try std.testing.expectEqualStrings("new", header.value);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), authorization);
+        try std.testing.expectEqual(@as(usize, 1), content_type);
+        try std.testing.expectEqual(@as(usize, 1), custom);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, payload.?, .{ .parse_numbers = false, .duplicate_field_behavior = .@"error" });
+        defer parsed.deinit();
+        const body = parsed.value.object;
+        try std.testing.expectEqualStrings("test-model", body.get("model").?.string);
+        const nested = body.get("unknown").?.object;
+        try std.testing.expectEqualStrings("1.234567890123456789e100", nested.get("number").?.number_string);
+        try std.testing.expectEqualStrings("nested", nested.get("model").?.string);
+        try std.testing.expectEqualStrings("kept", nested.get("format").?.string);
+        try std.testing.expectEqualStrings("0.75", body.get("temperature").?.number_string);
+        try std.testing.expect(!body.get("stream").?.bool);
+        if (self.structured) {
+            if (self.endpoint == .responses) {
+                try std.testing.expect(body.get("text").?.object.contains("format"));
+                try std.testing.expectEqualStrings("low", body.get("text").?.object.get("verbosity").?.string);
+            } else try std.testing.expect(body.contains("response_format"));
+        }
+    }
+
+    fn observe(ctx: ?*anyopaque, _: std.http.Method, url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        self.check(url, headers, payload) catch |err| {
+            self.failure = err;
+        };
+    }
+
+    fn send(ctx: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, request: http.Request) !http.Response {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        try self.check(request.url, request.headers, request.body);
+        const response = if (self.endpoint == .responses) "{\"output_text\":\"ok\"}" else "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}";
+        return .{ .allocator = allocator, .status = .ok, .body = try allocator.dupe(u8, response) };
+    }
+};
+
+fn extrasExercise(allocator: std.mem.Allocator, endpoint: Client.Endpoint, comptime structured: bool, comptime legacy: bool, override_auth: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const extra = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(),
+        \\{"unknown":{"number":1.234567890123456789e100,"model":"nested","format":"kept"},"temperature":0.75,"text":{"verbosity":"low"},"stream":false}
+    , .{ .parse_numbers = false });
+    var probe: ExtrasProbe = .{ .endpoint = endpoint, .structured = structured, .override_auth = override_auth };
+    var client = Client.init(.{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .api_key = "secret",
+        .endpoint = endpoint,
+        .base_url = "offline://openai/v1/?existing=1#fragment",
+        .transport = if (legacy) null else .{ .ctx = &probe, .send_fn = ExtrasProbe.send },
+    });
+    defer client.deinit();
+    const defaults = [_]std.http.Header{
+        .{ .name = "X-Extra", .value = "old" },
+        .{ .name = "x-extra", .value = "stale duplicate" },
+        .{ .name = "Content-Type", .value = "stale" },
+    };
+    client.sdk.default_headers = &defaults;
+    if (legacy) client.sdk.http_observer = .{ .ctx = &probe, .onRequest = ExtrasProbe.observe, .onResponse = null, .onError = null };
+    var request = plain_request;
+    request.extra_body = extra;
+    const overrides = [_]std.http.Header{
+        .{ .name = "cOnTeNt-TyPe", .value = "application/custom+json" },
+        .{ .name = "x-EXTRA", .value = "new" },
+        .{ .name = "aUtHoRiZaTiOn", .value = "custom auth" },
+    };
+    request.extra_headers = overrides[0..if (override_auth) 3 else 2];
+    request.extra_query = &.{ .{ .name = "a&b", .value = "x y+#" }, .{ .name = "a&b", .value = "two" } };
+    const schema: types.StructuredSchema = .{ .name = "Test", .schema_json = "{\"type\":\"object\"}" };
+    if (legacy) {
+        const result = if (structured) client.completeStructured(allocator, request, schema, .{}) else client.completeText(allocator, request);
+        if (result) |value| {
+            var completion = value;
+            completion.deinit(allocator);
+            return error.ExpectedOfflineError;
+        } else |err| switch (err) {
+            error.UnsupportedUriScheme => {},
+            else => return err,
+        }
+        if (probe.failure) |err| return err;
+    } else {
+        var completion = if (structured) try client.completeStructured(allocator, request, schema, .{}) else try client.completeText(allocator, request);
+        defer completion.deinit(allocator);
+        try std.testing.expectEqualStrings("ok", completion.text);
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@intFromPtr(&defaults), @intFromPtr(client.sdk.default_headers.ptr));
+    try std.testing.expectEqualStrings("old", defaults[0].value);
+}
+
+test "openai extras pass through every injected and legacy observer completion path" {
+    inline for (.{ Client.Endpoint.responses, .chat_completions }) |endpoint| {
+        inline for (.{ false, true }) |structured| {
+            inline for (.{ false, true }) |legacy| {
+                try extrasExercise(std.testing.allocator, endpoint, structured, legacy, true);
+                try extrasExercise(std.testing.allocator, endpoint, structured, legacy, false);
+            }
+        }
+    }
+}
+
+test "openai extras reject envelope streaming schema collisions and header injection before dispatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const schema: types.StructuredSchema = .{ .name = "Test", .schema_json = "{\"type\":\"object\"}" };
+    inline for (.{ Client.Endpoint.responses, .chat_completions }) |endpoint| {
+        var script: ScriptedTransport = .{ .endpoint = endpoint, .response = "{}" };
+        var client = scriptedClient(&script);
+        defer client.deinit();
+        inline for (.{ "{\"model\":\"other\"}", "{\"input\":[]}", "{\"messages\":[]}" }) |json| {
+            var request = plain_request;
+            request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json, .{});
+            try std.testing.expectError(error.ReservedBodyField, client.completeText(std.testing.allocator, request));
+            try std.testing.expectError(error.ReservedBodyField, client.completeStructured(std.testing.allocator, request, schema, .{}));
+        }
+        inline for (.{
+            if (endpoint == .responses) "{\"text\":null}" else "{\"response_format\":null}",
+            if (endpoint == .responses) "{\"text\":{\"format\":{}}}" else "{\"response_format\":{}}",
+            "{\"tools\":[]}",
+            "{\"tool_choice\":null}",
+        }) |json| {
+            var request = plain_request;
+            request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json, .{});
+            try std.testing.expectError(error.ReservedBodyField, client.completeStructured(std.testing.allocator, request, schema, .{}));
+        }
+        inline for (.{ "{\"stream\":true}", "{\"stream\":0}" }) |json| {
+            var request = plain_request;
+            request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json, .{});
+            try std.testing.expectError(error.UnsupportedStreaming, client.completeText(std.testing.allocator, request));
+            try std.testing.expectError(error.UnsupportedStreaming, client.completeStructured(std.testing.allocator, request, schema, .{}));
+        }
+        var request = plain_request;
+        request.extra_headers = &.{.{ .name = "X-Header", .value = "bad\r\nInjected: true" }};
+        try std.testing.expectError(error.InvalidHeader, client.completeText(std.testing.allocator, request));
+        try std.testing.expectEqual(@as(usize, 0), script.calls);
+    }
+}
+
+test "openai extras clean up all injected and legacy allocation failures" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    inline for (.{ false, true }) |legacy| {
+        inline for (.{ false, true }) |structured| {
+            const Exercise = struct {
+                fn run(allocator: std.mem.Allocator) !void {
+                    try extrasExercise(allocator, .responses, structured, legacy, true);
+                }
+            };
+            try std.testing.checkAllAllocationFailures(no_resize.allocator(), Exercise.run, .{});
+        }
+    }
+}
+
+const ScriptedTransport = struct {
+    response: []const u8,
+    status: std.http.Status = .ok,
+    endpoint: Client.Endpoint = .responses,
+    structured: bool = false,
+    inspect_request: bool = false,
+    calls: usize = 0,
+
+    fn transport(self: *ScriptedTransport) http.Transport {
+        return .{ .ctx = self, .send_fn = send };
+    }
+
+    fn send(ctx: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, request: http.Request) !http.Response {
+        const self: *ScriptedTransport = @ptrCast(@alignCast(ctx.?));
+        self.calls += 1;
+        if (self.inspect_request) {
+            try std.testing.expectEqual(std.http.Method.POST, request.method);
+            try std.testing.expectEqualStrings(if (self.endpoint == .responses)
+                "https://example.test/v1/responses"
+            else
+                "https://example.test/v1/chat/completions", request.url);
+            try std.testing.expectEqual(@as(usize, 4096), request.max_response_bytes);
+            try expectHeader(request.headers, "Authorization", "Bearer secret");
+            try expectHeader(request.headers, "Content-Type", "application/json");
+            try expectHeader(request.headers, "Accept", "application/json");
+            try expectHeader(request.headers, "X-Custom", "preserved");
+            try expectHeader(request.headers, "HTTP-Referer", "https://app.test");
+            try expectHeader(request.headers, "X-Title", "Example");
+            try expectHeader(request.headers, "OpenAI-Organization", "org");
+            try expectHeader(request.headers, "OpenAI-Project", "project");
+            const parsed = try std.json.parseFromSlice(std.json.Value, allocator, request.body.?, .{});
+            defer parsed.deinit();
+            const object = parsed.value.object;
+            try std.testing.expectEqualStrings("test-model", object.get("model").?.string);
+            try std.testing.expectEqual(@as(f64, 0.25), object.get("temperature").?.float);
+            const token_field = if (self.endpoint == .responses) "max_output_tokens" else "max_tokens";
+            try std.testing.expectEqual(@as(i64, 128), object.get(token_field).?.integer);
+            if (!self.structured) {
+                for ([_][]const u8{ "text", "response_format", "tools", "tool_choice" }) |field| {
+                    try std.testing.expect(object.get(field) == null);
+                }
+            }
+            if (self.endpoint == .responses) {
+                const message = object.get("input").?.array.items[0].object;
+                try std.testing.expectEqualStrings("user", message.get("role").?.string);
+                try std.testing.expectEqualStrings("Hello", message.get("content").?.string);
+            } else {
+                const message = object.get("messages").?.array.items[0].object;
+                try std.testing.expectEqualStrings("user", message.get("role").?.string);
+                try std.testing.expectEqualStrings("Hello", message.get("content").?.string);
+            }
+        }
+        return .{ .allocator = allocator, .status = self.status, .body = try allocator.dupe(u8, self.response) };
+    }
+
+    fn expectHeader(headers: []const std.http.Header, name: []const u8, value: []const u8) !void {
+        for (headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, name) and std.mem.eql(u8, header.value, value)) return;
+        }
+        return error.MissingExpectedHeader;
+    }
+};
+
+fn scriptedClient(script: *ScriptedTransport) Client {
+    var client = Client.init(.{
+        .allocator = std.testing.allocator,
+        .io = std.testing.io,
+        .api_key = "secret",
+        .base_url = "https://example.test/v1/",
+        .endpoint = script.endpoint,
+        .http_referer = "https://app.test",
+        .app_name = "Example",
+        .transport = script.transport(),
+        .max_response_bytes = 4096,
+    });
+    client.sdk.default_headers = &.{.{ .name = "X-Custom", .value = "preserved" }};
+    client.sdk.organization = "org";
+    client.sdk.project = "project";
+    return client;
+}
+
+const plain_request: Client.Request = .{
+    .model = "test-model",
+    .messages = &.{.{ .role = .user, .content = "Hello" }},
+    .temperature = 0.25,
+    .max_output_tokens = 128,
+};
+
+test "openai ordinary transport sends schema-free responses and chat requests" {
+    const bodies = [_][]const u8{
+        \\{"status":"completed","error":null,"output":[{"type":"message","status":"completed","content":[{"type":"output_text","text":"Hello "},{"type":"output_text","text":"world"}]},{"type":"message","content":[{"type":"output_text","text":"!"}]}],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}
+        ,
+        \\{"choices":[{"finish_reason":"stop","message":{"content":[{"type":"text","text":"Hello "},{"type":"text","text":"world!"}]}},{"message":{"content":"ignored"}}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}
+        ,
+    };
+    inline for (.{ Client.Endpoint.responses, .chat_completions }, bodies) |endpoint, body| {
+        var script: ScriptedTransport = .{ .endpoint = endpoint, .response = body, .inspect_request = true };
+        var client = scriptedClient(&script);
+        defer client.deinit();
+        var completion = try client.completeText(std.testing.allocator, plain_request);
+        defer completion.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("Hello world!", completion.text);
+        try std.testing.expectEqualStrings(body, completion.raw_response);
+        try std.testing.expectEqual(@as(u64, 2), completion.usage.input_tokens);
+        try std.testing.expectEqual(@as(u64, 3), completion.usage.output_tokens);
+        try std.testing.expectEqual(@as(u64, 5), completion.usage.total_tokens);
+        try std.testing.expectEqual(@as(usize, 1), script.calls);
+        try std.testing.expect(client.lastStatus() == null);
+        try std.testing.expectEqual(@as(usize, 1), client.sdk.default_headers.len);
+        try std.testing.expectEqualStrings("X-Custom", client.sdk.default_headers[0].name);
+    }
+}
+
+test "openai ordinary transport refuses partial text and keeps diagnostics" {
+    const Case = struct { endpoint: Client.Endpoint = .responses, body: []const u8, status: std.http.Status = .ok, err: anyerror };
+    const cases = [_]Case{
+        .{ .body = "denied", .status = .unauthorized, .err = error.ProviderHttpError },
+        .{ .body = "{\"error\":{\"message\":\"bad\"}}", .err = error.ProviderHttpError },
+        .{ .body = "{\"output\":[{\"content\":[{\"text\":\"partial\"},{\"type\":\"refusal\",\"refusal\":\"no\"}]}]}", .err = error.Refusal },
+        .{ .body = "{\"status\":\"incomplete\",\"output_text\":\"partial\"}", .err = error.IncompleteResponse },
+        .{ .body = "{\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"output_text\":\"partial\"}", .err = error.IncompleteResponse },
+        .{ .body = "{\"output\":[{\"status\":\"incomplete\",\"content\":[{\"text\":\"partial\"}]}]}", .err = error.IncompleteResponse },
+        .{ .body = "{\"output\":[{\"type\":\"function_call\",\"arguments\":\"not text\"}]}", .err = error.MissingOutputText },
+        .{ .body = "{\"output\":42}", .err = error.InvalidProviderResponse },
+        .{ .body = "not json", .err = error.SyntaxError },
+        .{ .endpoint = .chat_completions, .body = "{\"choices\":[{\"message\":{\"content\":\"partial\",\"refusal\":\"no\"}}]}", .err = error.Refusal },
+        .{ .endpoint = .chat_completions, .body = "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"partial\"}}]}", .err = error.IncompleteResponse },
+        .{ .endpoint = .chat_completions, .body = "{\"choices\":[{\"finish_reason\":\"content_filter\",\"message\":{\"content\":\"partial\"}}]}", .err = error.Refusal },
+        .{ .endpoint = .chat_completions, .body = "{\"choices\":[{\"message\":{\"tool_calls\":[{\"function\":{\"arguments\":\"not text\"}}]}}]}", .err = error.MissingOutputText },
+    };
+    for (cases) |case| {
+        var script: ScriptedTransport = .{ .endpoint = case.endpoint, .response = case.body, .status = case.status };
+        var client = scriptedClient(&script);
+        defer client.deinit();
+        try std.testing.expectError(case.err, client.completeText(std.testing.allocator, plain_request));
+        try std.testing.expectEqual(case.status, client.lastStatus().?);
+        try std.testing.expectEqualStrings(case.body, client.lastErrorBody().?);
+        script.status = .ok;
+        script.response = if (case.endpoint == .responses) "{\"output_text\":\"ok\"}" else "{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}";
+        var completion = try client.completeText(std.testing.allocator, plain_request);
+        defer completion.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("ok", completion.text);
+        try std.testing.expect(client.lastStatus() == null);
+        try std.testing.expect(client.lastErrorBody() == null);
+    }
+}
+
+test "openai structured transport preserves every supported mode" {
+    const schema: types.StructuredSchema = .{ .name = "Person", .schema_json = "{\"type\":\"object\"}" };
+    inline for (.{ Client.Endpoint.responses, .chat_completions }) |endpoint| {
+        inline for (.{ types.Mode.json_schema, .json_object, .tool_call, .tool_call_required, .responses_tool_call, .responses_tool_call_required }) |mode| {
+            if (modeSupported(endpoint, mode)) {
+                const body = if (endpoint == .responses)
+                    "{\"output\":[{\"type\":\"function_call\",\"arguments\":\"{}\"}]}"
+                else
+                    "{\"choices\":[{\"message\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{}\"}}]}}]}";
+                var script: ScriptedTransport = .{ .endpoint = endpoint, .response = body, .structured = true, .inspect_request = true };
+                var client = scriptedClient(&script);
+                defer client.deinit();
+                var completion = try client.completeStructured(std.testing.allocator, plain_request, schema, .{ .mode = mode });
+                defer completion.deinit(std.testing.allocator);
+                try std.testing.expectEqualStrings("{}", completion.text);
+                try std.testing.expectEqual(@as(usize, 1), script.calls);
+            }
+        }
+    }
+}
+
+fn completionAllocationTest(allocator: std.mem.Allocator, endpoint: Client.Endpoint) !void {
+    var script: ScriptedTransport = .{
+        .endpoint = endpoint,
+        .response = if (endpoint == .responses)
+            "{\"error\":null,\"output\":[{\"content\":[{\"text\":\"ok\"}]}],\"usage\":{\"total_tokens\":3}}"
+        else
+            "{\"choices\":[{\"message\":{\"content\":\"ok\"}}],\"usage\":{\"total_tokens\":3}}",
+    };
+    var client = Client.init(.{ .allocator = allocator, .io = std.testing.io, .api_key = "offline", .endpoint = endpoint, .transport = script.transport() });
+    defer client.deinit();
+    var completion = try client.completeText(allocator, plain_request);
+    defer completion.deinit(allocator);
+    try std.testing.expectEqualStrings("ok", completion.text);
+    try std.testing.expectEqual(@as(u64, 3), completion.usage.total_tokens);
+}
+
+test "openai completion and diagnostics propagate all allocation failures" {
+    // Disable in-place growth so allocator bucket state cannot change the
+    // allocation count between the baseline and exhaustive failure passes.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    inline for (.{ Client.Endpoint.responses, .chat_completions }) |endpoint| {
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), completionAllocationTest, .{endpoint});
+    }
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var script: ScriptedTransport = .{ .response = "{\"output\":[{\"content\":[{\"type\":\"refusal\",\"refusal\":\"no\"}]}]}" };
+    var client = Client.init(.{ .allocator = failing.allocator(), .io = std.testing.io, .api_key = "offline", .transport = script.transport() });
+    defer client.deinit();
+    // The response allocator works; allocating the owned diagnostic must fail.
+    try std.testing.expectError(error.OutOfMemory, client.completeText(std.testing.allocator, plain_request));
 }
 
 test "extract output text from responses shape" {

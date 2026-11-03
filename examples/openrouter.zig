@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !void {
     const person = session.create(Person, instructor.OpenAI.Request{
         // Replace with any OpenRouter free model slug when testing.
         .model = "openai/gpt-oss-20b:free",
-        .messages = &.{.{ .role = .user, .content = "Robby is 24. Return only the structured person." }},
+        .messages = &.{.{ .role = .user, .content = "Alex is 24. Return only the structured person." }},
     }, .{}) catch |err| {
         instructor.printError(err, &client);
         return err;

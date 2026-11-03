@@ -52,16 +52,16 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     const source =
-        \\Robby is 24 and lives in Philadelphia.
-        \\He uses Zig for low-level tools and likes structured outputs because they remove brittle JSON parsing.
-        \\In April 2026, his priority is building reliable agent workflows with citations and typed action plans.
+        \\Alex is 24 and works at a bookshop.
+        \\They manage online orders and help customers find books.
+        \\In April 2026, their priority is updating the stock list before the spring sale.
     ;
 
     const result = session.create(GroundedAnswer, instructor.OpenAI.Request{
         .model = "openai/gpt-oss-20b:free",
         .messages = &.{.{
             .role = .user,
-            .content = "Using only this source, answer: what is Robby's April 2026 priority? Include exact supporting quotes.\n\n" ++ source,
+            .content = "Using only this source, answer: what is Alex's April 2026 priority? Include exact supporting quotes.\n\n" ++ source,
         }},
     }, .{}) catch |err| {
         instructor.printError(err, &client);

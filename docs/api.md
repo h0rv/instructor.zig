@@ -1,6 +1,69 @@
-# `instructor.zig` API spec
+# Client, session, and provider API
 
 Target Zig version: `0.17.0` stable APIs.
+
+## Common client
+
+`instructor.Client` has resource fields `responses` and `messages`. Use them without resource parentheses:
+
+```zig
+const Product = struct {
+    name: []const u8,
+    price: f64,
+    in_stock: bool,
+};
+
+var product = try client.responses.parse(Product, .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+});
+defer product.deinit();
+
+std.debug.print("{s}: {d:.2}, in stock={}\n", .{
+    product.value.name,
+    product.value.price,
+    product.value.in_stock,
+});
+
+const messages = [_]instructor.Message{
+    .{ .role = .user, .content = "Extract the product: Coffee mug costs $12.50 and is in stock." },
+};
+var parsed = try client.messages.parse(Product, .{ .messages = &messages });
+defer parsed.deinit();
+```
+
+Use `create` for ordinary text without an output schema:
+
+```zig
+var response = try client.responses.create(.{ .input = "Say hello." });
+defer response.deinit();
+
+var reply = try client.messages.create(.{ .messages = &.{
+    .{ .role = .user, .content = "Say hello." },
+} });
+defer reply.deinit();
+```
+
+The resource fields borrow stable heap state owned by the client. Moving the outer client does not invalidate resource handles. Do not copy an active client owner or use a handle after `client.deinit()`. Results may outlive the client if their backing allocator is still alive.
+
+`ResponseCreateParams` requires a text `input` and has optional `model`, `max_output_tokens`, and `temperature` fields. `MessageCreateParams` requires `messages` and has optional `model`, `max_tokens`, and `temperature` fields. Both also accept:
+
+```zig
+extra_body: ?std.json.Value = null,
+extra_headers: []const std.http.Header = &.{},
+extra_query: []const instructor.QueryParam = &.{},
+```
+
+`QueryParam` has `name: []const u8` and `value: []const u8`. `ClientConfig` and `EnvConfig` accept `extra_body` and `extra_query` with the same defaults. Their existing `headers` field supplies default headers. Initialization deeply copies the defaults. Request values are borrowed only during the call.
+
+Client and request JSON objects merge recursively. Request arrays and scalars replace existing values. Unknown body keys are passed through. Request query entries replace defaults by raw name, preserve repeated request names, and use RFC 3986 component encoding. Request headers override defaults, authentication, and content type case-insensitively without duplicate names.
+
+A non-object body returns `error.InvalidExtraBody`. Extras cannot override `model`, `input`, or `messages`. Parsing also protects `text.format`, `response_format`, `output_config.format`, `tools`, and `tool_choice`. These conflicts return `error.ReservedBodyField`. Siblings such as `text.verbosity` and `output_config.effort` remain allowed. An extra `stream` value of `true` or a non-boolean returns `error.UnsupportedStreaming`. `false` is allowed. Invalid headers return `error.InvalidHeader`.
+
+Both resources also offer `parseWith`, `parseInto`, and `parseIntoWith`. Parsing retains local validation and retries. See [the client guide](client.md) for ownership and parsing options, or [request extras](client.md#request-extras) for examples and full merge rules.
+
+## Retained lower-level API
+
+The remaining sections describe the existing `OpenAI`, `Anthropic`, and `Session` APIs. Request extras work across all three HTTP adapters for ordinary and typed requests, including provider SDK paths without an injected transport. Generated SDK files and dependency pins are unchanged.
 
 Status: v0 design. Parsed values are validated by default with `jsonschema.validateValue` for supported metadata.
 
@@ -31,7 +94,7 @@ This matches Zig style and `std.Io`: caller controls I/O, allocation, and lifeti
 - Full JSON Schema spec validation.
 - `T.validate()` hooks.
 - Streaming.
-- Union extraction.
+- Arbitrary root unions without an object wrapper.
 - Multi-provider parity with `instructor-go`.
 - Rich error payloads.
 - Full OpenAI generated SDK correctness.
@@ -54,15 +117,15 @@ const request: instructor.OpenAI.Request = .{
     .messages = &.{
         .{
             .role = .user,
-            .content = "Robby is 24.",
+            .content = "Extract the product: Coffee mug costs $12.50 and is in stock.",
         },
     },
 };
 
-const person = try session.create(Person, request, .{});
+const product = try session.create(Product, request, .{});
 ```
 
-`person` is valid until `session.deinit()`.
+`product` is valid until `session.deinit()`.
 
 ## Type-level API
 
@@ -119,7 +182,7 @@ Possible use:
 var s = instructor.session(gpa, &client);
 defer s.deinit();
 
-const person = try s.create(Person, req, .{});
+const product = try s.create(Product, req, .{});
 ```
 
 ## Why not return wrapper
@@ -127,9 +190,9 @@ const person = try s.create(Person, req, .{});
 Returning wrapper is safe but noisy:
 
 ```zig
-var result = try instructor.create(Person, ...);
+var result = try instructor.create(Product, ...);
 defer result.deinit();
-const person = result.value;
+const product = result.value;
 ```
 
 Session makes lifetime explicit once and returns `T` directly:
@@ -138,7 +201,7 @@ Session makes lifetime explicit once and returns `T` directly:
 var session = instructor.session(gpa, &client);
 defer session.deinit();
 
-const person = try session.create(Person, req, .{});
+const product = try session.create(Product, req, .{});
 ```
 
 This is better for app code and still memory-safe.
@@ -148,11 +211,11 @@ This is better for app code and still memory-safe.
 All allocations needed by returned `T` live in `Session` arena.
 
 ```zig
-const person = try session.create(Person, req, .{});
-// person.name, slices, nested arrays valid here
+const product = try session.create(Product, req, .{});
+// product.name, price, and in_stock are valid here
 
 session.deinit();
-// person invalid after this point
+// product invalid after this point
 ```
 
 `Session.reset()` frees all prior results and usage/raw debug memory. Any previously returned `T` becomes invalid after reset.
@@ -232,8 +295,8 @@ Example:
 var arena = std.heap.ArenaAllocator.init(gpa);
 defer arena.deinit();
 
-const person = try instructor.createWithArena(
-    Person,
+const product = try instructor.createWithArena(
+    Product,
     gpa,
     arena.allocator(),
     &client,
@@ -542,6 +605,9 @@ pub const OpenAI = struct {
         messages: []const Message,
         temperature: ?f64 = null,
         max_output_tokens: ?u32 = null,
+        extra_body: ?std.json.Value = null,
+        extra_headers: []const std.http.Header = &.{},
+        extra_query: []const instructor.QueryParam = &.{},
     };
 
     pub const Message = struct {
@@ -639,7 +705,7 @@ pub const Error = error{
 };
 ```
 
-Provider adapters can return transport/provider-specific errors too.
+Provider adapters can return transport/provider-specific errors too. Request extras may return `InvalidExtraBody`, `ReservedBodyField`, `UnsupportedStreaming`, or `InvalidHeader` before sending a request. See [request extras](client.md#request-extras) for the validation rules.
 
 Zig errors have no payload, so providers expose diagnostics separately:
 
@@ -679,4 +745,4 @@ pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
 - Hook API for request/response/parse/retry/completion events.
 - Fake provider tests for success, retry, detailed result, and hooks.
 - OpenAI-compatible HTTP provider for Responses and Chat Completions.
-- Optional validation integration later.
+- Local validation of supported JSON Schema constraints, enabled by default.

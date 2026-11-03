@@ -1,37 +1,22 @@
 # instructor.zig
 
-[![Zig Version](https://img.shields.io/badge/zig-0.17.0-orange.svg)](https://ziglang.org/download/)
+Get structured data from LLMs as Zig types. This library requires Zig 0.17.0.
 
-Typed structured outputs for Zig.
+Define a struct and call `parse`. Instructor generates its JSON Schema and validates the result. If parsing or validation fails, Instructor sends error feedback to the model and retries.
 
-Targets Zig `0.17.0` stable APIs.
+Use the same `client.responses.parse` or `client.messages.parse` calls with OpenAI Responses, OpenAI-compatible Chat Completions, or Anthropic Messages. Choose the provider and endpoint in client configuration.
 
-Define a Zig struct, send its JSON Schema to an OpenAI-compatible provider or native Anthropic Messages, and get a typed value back. Memory for returned values is owned by a session arena.
-
-Built with:
-
-- [`jsonschema.zig`](https://github.com/h0rv/jsonschema.zig) for schema generation and value validation
-- [`openai.zig`](https://github.com/h0rv/openai.zig) for OpenAI-compatible HTTP and API types
-- [`anthropic.zig`](https://github.com/h0rv/anthropic.zig) for native Anthropic Messages
-
-What it does:
-
-- Generate JSON Schema from Zig types
-- Call OpenAI Responses, Chat Completions, OpenRouter-compatible APIs, or native Anthropic Messages
-- Parse model output directly into `T`
-- Validate parsed values by default and retry with concrete errors
-- Support JSON Schema, JSON object, tool-call, and multimodal image modes
-- Keep result memory explicit with `Session` owned arenas
+The common `Client` API is unreleased. The existing `OpenAI`, `Anthropic`, and `Session` APIs remain available.
 
 ## Install
 
-Add the package from GitHub:
+For this unreleased API, fetch the feature branch:
 
 ```sh
-zig fetch --save=instructor git+https://github.com/h0rv/instructor.zig.git
+zig fetch --save=instructor git+https://github.com/h0rv/instructor.zig.git#feat/llm-client
 ```
 
-Then add the module in your `build.zig`:
+Pin a commit for reproducible builds. Add the module in `build.zig`:
 
 ```zig
 const dep = b.dependency("instructor", .{
@@ -42,483 +27,164 @@ const dep = b.dependency("instructor", .{
 exe.root_module.addImport("instructor", dep.module("instructor"));
 ```
 
-This repository is named `instructor.zig`. The Zig package and module name is `instructor`.
+## Extract a product
 
-## Example
+Set `ANTHROPIC_API_KEY` for this example:
 
 ```zig
 const std = @import("std");
 const instructor = @import("instructor");
 
-const Person = struct {
+const Product = struct {
     name: []const u8,
-    age: u8,
-
-    pub const jsonschema = .{
-        .name = "Person",
-        .description = "Extract person details.",
-    };
+    price: f64,
+    in_stock: bool,
 };
 
 pub fn main(init: std.process.Init) !void {
-    const gpa = init.gpa;
-    const key = init.environ_map.get("OPENAI_API_KEY") orelse
-        return error.MissingApiKey;
-
-    var client = instructor.OpenAI.init(.{
-        .allocator = gpa,
-        .io = init.io,
-        .api_key = key,
+    var ai = try instructor.Client.fromEnv(init, .{
+        .provider = .anthropic,
+        .model = "claude-haiku-4-5",
     });
-    defer client.deinit();
+    defer ai.deinit();
 
-    var session = instructor.session(gpa, &client);
-    defer session.deinit();
+    var product = try ai.responses.parse(Product, .{
+        .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+    });
+    defer product.deinit();
 
-    const request: instructor.OpenAI.Request = .{
-        .model = instructor.OpenAI.default_model,
-        .messages = &.{
-            .{
-                .role = .user,
-                .content = "Robby is 24.",
-            },
-        },
-    };
-
-    const person = try session.create(Person, request, .{});
-
-    std.debug.print("{s}: {}\n", .{ person.name, person.age });
+    std.debug.print("{s}: {d:.2}, in stock={}\n", .{
+        product.value.name,
+        product.value.price,
+        product.value.in_stock,
+    });
 }
 ```
 
-Output:
+Expected output:
 
 ```text
-Robby: 24
+Coffee mug: 12.50, in stock=true
 ```
 
-`person` is valid until `session.deinit()` or `session.reset()`.
+The result owns its memory. It remains valid after client cleanup if the backing allocator is still alive. Deinitialize each owner once and do not copy an active owner.
 
-## Anthropic
+Run [this example](examples/client.zig) with `zig build run-client`. It makes a live request and may retry. To try the same extraction without credentials or network access, run `zig build run-custom-transport`.
 
-`Anthropic` uses the native `/v1/messages` API through `anthropic.zig` with API version `2026-10-21`.
+## What you can build
+
+| Feature | Example or guide |
+| --- | --- |
+| Generate schemas from Zig types. | [Product extraction](examples/client.zig). |
+| Validate field constraints and retry with error feedback. | [Name and age constraints](examples/openrouter.zig) and [retry options](docs/client.md#parsing-options-and-retries). |
+| Extract nested objects and arrays. | [Invoice with line items](examples/invoice_extraction.zig). |
+| Process reviews one at a time and free each result. | [Batch extraction](examples/batch_extract.zig) with `Session.reset()`. |
+| Classify text into typed cases. | [Tagged union classification](examples/classify_union.zig) and [support routing](examples/support_router.zig). |
+| Request answers with supporting quotes. | [Exact citations](examples/exact_citations.zig). Check quotes against the source before trusting them. |
+| Extract tasks or propose redactions. | [Meeting actions](examples/action_items.zig) and [PII redaction](examples/pii_redaction.zig). Review redactions before logging sensitive text. |
+| Observe requests and retries. | [Hooks and usage](docs/api.md#hooks). |
+| Use your own HTTP client. | [Offline custom transport](examples/custom_transport.zig). |
+
+Most advanced examples use `Session`, not the common client.
+
+## Providers and requests
+
+With `Client.fromEnv`, use `.provider = .openai` and set `OPENAI_API_KEY` for OpenAI Responses. Choose `.endpoint = .chat_completions` and a `base_url` for compatible services. Set a model appropriate to the selected service. Model names are not restricted to a built-in catalog.
+
+`fromEnv` reads the process context you pass in. For servers, use `Client.init` with an explicit allocator and `std.Io`. Credentials can come from your own configuration:
 
 ```zig
-const key = init.environ_map.get("ANTHROPIC_API_KEY") orelse
-    return error.MissingApiKey;
-
-var client = instructor.Anthropic.init(.{
-    .allocator = init.gpa,
-    .io = init.io,
-    .api_key = key,
-    .max_tokens = 1024,
+var ai = try instructor.Client.init(.{
+    .allocator = allocator,
+    .io = io,
+    .provider = .{
+        .openai = .{
+            .api_key = api_key,
+            .base_url = "https://openrouter.ai/api/v1",
+            .endpoint = .chat_completions,
+        },
+    },
+    .model = "your-model",
 });
-defer client.deinit();
+defer ai.deinit();
+```
 
-var session = instructor.session(init.gpa, &client);
-defer session.deinit();
+Client configuration strings and default `headers` are copied. Client defaults in `extra_body` and `extra_query` are deeply copied during initialization. Request values are borrowed only until the call returns.
 
-const request: instructor.Anthropic.Request = .{
-    .model = instructor.Anthropic.default_model,
+For ordinary text without an output schema, use `create`. For a conversation, use `messages`. Both resources have `create` and `parse` methods:
+
+```zig
+var reply = try ai.messages.create(.{
     .messages = &.{
         .{
-            .role = .user,
-            .content = "Robby is 24.",
+            .role = .system,
+            .content = "Answer briefly.",
         },
-    },
-};
-
-const person = try session.create(Person, request, .{});
-
-std.debug.print("{s}: {}\n", .{ person.name, person.age });
-```
-
-The default mode sends `output_config.format` with a JSON Schema. `.tool_call` sends a strict native tool without forcing its use. `.tool_call_required` explicitly forces that named tool and depends on model support. `.json_object` and `.responses_*` modes return `UnsupportedMode`. Images return `UnsupportedImages`.
-
-System messages become top-level system text blocks. The required `max_tokens` defaults to 4096 in client config and can be overridden per request. There are no `temperature` or `top_p` fields on this provider's request.
-
-The remote schema omits unsupported numeric, string length, and array bounds, including bounds inferred by the default Instructor profile. Core still validates the original constraints locally and retries on failure. `anthropic_schema_options` disables inferred bounds and `$defs`. References, recursion, and unsupported schema constructs return explicit errors rather than changing their meaning. Refusals and token truncation are errors even with HTTP 200. Use `instructor.printError(err, &client)` to inspect the status and response body.
-
-Build the example without credentials with `zig build anthropic-example`. Run it with `ANTHROPIC_API_KEY` set using `zig build run-anthropic`.
-
-## API
-
-```zig
-pub fn session(allocator: std.mem.Allocator, provider: anytype) Session(Provider);
-
-pub fn Session(comptime Provider: type) type;
-```
-
-`Session(Provider)` exposes:
-
-```zig
-usage: Usage,
-last_usage: Usage,
-last_text: ?[]const u8,
-last_raw_response: ?[]const u8,
-
-pub fn create(
-    self: *Session,
-    comptime T: type,
-    request: anytype,
-    comptime options: Options,
-) !T;
-
-pub fn createDetailed(
-    self: *Session,
-    comptime T: type,
-    request: anytype,
-    comptime options: Options,
-) !CreateResult(T);
-
-pub fn setHooks(self: *Session, hooks: Hooks) void;
-pub fn reset(self: *Session) void;
-pub fn deinit(self: *Session) void;
-```
-
-```zig
-pub fn CreateResult(comptime T: type) type {
-    return struct {
-        value: T,
-        text: []const u8,
-        raw_response: []const u8,
-        usage: Usage,
-    };
-}
-```
-
-```zig
-pub const Options = struct {
-    mode: Mode = .json_schema,
-    max_retries: u8 = 3,
-    validate: bool = true,
-    schema_options: jsonschema.Options = jsonschema.strict_options,
-    parse_options: std.json.ParseOptions = .{ .allocate = .alloc_always },
-};
-```
-
-## Validation and schema options
-
-`instructor.zig` validates parsed values with `jsonschema.validateValue` by default. Parse or validation failures are retried with concrete error feedback until `max_retries` is exhausted.
-
-Migration note: if older code accepted parseable but constraint-invalid outputs, set `.validate = false` while tightening prompts/schemas:
-
-```zig
-const value = try session.create(T, req, .{ .validate = false });
-```
-
-`instructor.zig` uses `jsonschema.strict_options` by default. Pass comptime `schema_options` to use newer `jsonschema.zig` features such as field naming:
-
-```zig
-const user = try session.create(User, req, .{
-    .schema_options = comptime blk: {
-        var opts = instructor.openai_schema_options;
-        opts.field_naming = .camelCase;
-        break :blk opts;
-    },
-});
-```
-
-You can inspect the schema sent to providers:
-
-```zig
-var schema = try instructor.schemaAlloc(User, gpa, instructor.openai_schema_options);
-defer schema.deinit(gpa);
-
-std.debug.print("{s}\n", .{schema.schema_json});
-```
-
-## Object roots
-
-Some provider structured-output modes require the root schema to be an object. Wrap root arrays or root unions in a normal Zig struct and use `create` as usual.
-
-For arrays:
-
-```zig
-const ActionItem = struct {
-    task: []const u8,
-    owner: []const u8,
-};
-
-const ActionItems = struct {
-    items: []const ActionItem,
-
-    pub const jsonschema = .{
-        .name = "ActionItems",
-        .description = "Extract action items.",
-        .fields = .{
-            .items = .{ .description = "Action items." },
-        },
-    };
-};
-
-const result = try session.create(ActionItems, req, .{});
-for (result.items) |item| {
-    std.debug.print("{s}: {s}\n", .{ item.owner, item.task });
-}
-```
-
-For unions:
-
-```zig
-const Next = struct {
-    action: Action,
-};
-
-const next = try session.create(Next, req, .{});
-switch (next.action) {
-    .search => |search| ...,
-    .finish => |finish| ...,
-}
-```
-
-This keeps schema shape, provider response shape, and parsed Zig type explicit.
-
-## OpenAI-compatible provider
-
-The provider uses `openai.zig` for the OpenAI HTTP client and generated API surface.
-
-```zig
-var client = instructor.OpenAI.init(.{
-    .allocator = gpa,
-    .io = init.io,
-    .api_key = api_key,
-    .base_url = "https://api.openai.com/v1",
-    .endpoint = .responses,
-});
-```
-
-`base_url` and `endpoint` can be changed for compatible APIs:
-
-```zig
-var client = instructor.OpenAI.init(.{
-    .allocator = gpa,
-    .io = init.io,
-    .api_key = init.environ_map.get("OPENROUTER_API_KEY") orelse return error.MissingApiKey,
-    .base_url = "https://openrouter.ai/api/v1",
-    .endpoint = .chat_completions,
-    .http_referer = "https://github.com/h0rv/instructor.zig",
-    .app_name = "instructor.zig",
-});
-```
-
-Supported endpoints:
-
-| Endpoint | Path | Schema transport |
-| --- | --- | --- |
-| `.responses` | `/responses` | `text.format` |
-| `.chat_completions` | `/chat/completions` | `response_format` |
-
-## Hooks
-
-Hooks observe requests, responses, parse errors, retries, and completions.
-
-```zig
-const State = struct {
-    fn onEvent(ctx: ?*anyopaque, event: instructor.HookEvent, info: instructor.HookInfo) void {
-        _ = ctx;
-        std.debug.print("{s} attempt={}\n", .{ @tagName(event), info.attempt });
-    }
-};
-
-session.setHooks(.{ .on_event = State.onEvent });
-```
-
-Events:
-
-```zig
-pub const HookEvent = enum {
-    request_start,
-    response_received,
-    parse_error,
-    validation_error,
-    retry,
-    completion_done,
-};
-```
-
-## Modes
-
-Default mode uses provider structured outputs:
-
-```zig
-const value = try session.create(T, req, .{});
-```
-
-Available modes:
-
-| Mode | Endpoint | Behavior |
-| --- | --- | --- |
-| `.json_schema` | Responses or Chat Completions | Provider-native structured outputs. |
-| `.json_object` | Responses or Chat Completions | JSON mode fallback; parse/retry still applies. |
-| `.tool_call` | Chat Completions | Sends `T` as a function tool and parses first tool-call arguments. |
-| `.tool_call_required` | Chat Completions | Same, with forced function choice. |
-| `.responses_tool_call` | Responses | Sends `T` as a Responses function tool and parses first function-call arguments. |
-| `.responses_tool_call_required` | Responses | Same, with forced function choice. |
-
-Messages may include image URLs for multimodal Responses or Chat Completions requests:
-
-```zig
-const images = [_]instructor.OpenAI.Image{.{
-    .url = "https://example.com/image.jpg",
-    .detail = "low",
-}};
-
-const request: instructor.OpenAI.Request = .{
-    .model = "gpt-5.4-nano",
-    .messages = &.{
         .{
             .role = .user,
-            .content = "Inspect this image.",
-            .images = &images,
+            .content = "What is an arena allocator?",
         },
     },
-};
-
-const value = try session.create(T, request, .{});
+    .max_tokens = 256,
+});
+defer reply.deinit();
 ```
 
-Example:
+`responses` currently accepts only text in `input`. Its token limit is `max_output_tokens`. The resource fields borrow stable heap state and remain valid when you move the outer client. They must not outlive `client.deinit()`. Do not copy an active client owner.
+
+Requests can override `model`. OpenAI requests also support `temperature`. The current Anthropic adapter rejects that control instead of silently ignoring it.
+
+For provider fields beyond the typed parameters, use `extra_body`, `extra_headers`, or `extra_query` on either resource. See [request extras](docs/client.md#request-extras) for merge rules and protected fields.
+
+## Bring your own HTTP client
+
+Pass a borrowed `http.Transport` to `Client.init` or `Client.fromEnv`. Its callback receives the URL and headers with the request body. It returns an owned HTTP response. Instructor never closes the injected context.
+
+An existing standard-library client has a ready-made adapter:
 
 ```zig
-const value = try session.create(T, req, .{ .mode = .tool_call });
+.transport = instructor.http.Transport.fromStd(&http_client),
 ```
 
-Use required tool modes with OpenAI proper. Some OpenAI-compatible routers reject forced `tool_choice`.
+Other HTTP clients implement the same small callback. See [the transport contract](docs/transport.md) and [the runnable offline example](examples/custom_transport.zig).
 
-## Diagnostics
+Without an injected transport, Instructor owns a pooled standard-library client. It keeps TLS verification enabled and does not follow redirects. The default response limit is 8 MiB, applied after decompression to success and error bodies. Set `max_response_bytes` to change it.
 
-Provider errors expose optional status and body.
+## Control memory and parsing
+
+If your application already has a request arena, put results there:
 
 ```zig
-const value = session.create(MyType, req, .{}) catch |err| {
-    instructor.printError(err, &client);
-    return err;
-};
+const product = try ai.responses.parseInto(Product, arena.allocator(), .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+});
 ```
 
-For custom output:
+Here, `product` is a `Product` value and remains valid until you release the arena. There is no per-result `deinit`.
+
+Use `parseWith` or `parseIntoWith` with compile-time `ParseOptions`:
 
 ```zig
-try instructor.writeError(writer, err, &client);
+var product = try ai.responses.parseWith(Product, .{
+    .input = "Extract the product: Coffee mug costs $12.50 and is in stock.",
+}, .{ .max_retries = 1 });
+defer product.deinit();
 ```
 
-## Generated docs
-
-Build Zig API docs:
-
-```sh
-zig build docs
-```
-
-Serve them with the Zig-native dev server:
-
-```sh
-zig build run-serve-docs
-# or
-mise run serve-docs
-```
-
-Open <http://127.0.0.1:8000/>.
-
-## Examples
-
-Run examples after exporting API keys:
-
-```sh
-set -a; . ./.env; set +a
-zig build run-openrouter
-zig build run-tool-planner
-zig build run-exact-citations
-zig build run-action-items
-zig build run-agent
-zig build run-native-tool-call
-zig build run-multimodal-inspection
-zig build run-support-router
-zig build run-invoice-extraction
-zig build run-llm-judge
-zig build run-pii-redaction
-zig build run-query-understanding
-zig build run-batch-extract
-zig build run-responses-tool-call
-zig build run-classify-union
-```
-
-Or use mise tasks. `.mise.toml` loads `.env` for tasks:
-
-```sh
-mise run openrouter
-mise run planner
-mise run citations
-mise run actions
-mise run agent
-mise run tool-call
-mise run multimodal
-mise run router
-mise run invoice
-mise run judge
-mise run redact
-mise run query
-mise run batch
-mise run responses-tool
-mise run classify
-```
-
-Included examples:
-
-- `examples/openrouter.zig`: basic structured extraction.
-- `examples/tool_planner.zig`: function-calling-style typed tool planning.
-- `examples/exact_citations.zig`: grounded answer with exact quotes.
-- `examples/action_items.zig`: meeting transcript to typed action items.
-- `examples/agent.zig`: typed agent loop using a native Zig tagged union.
-- `examples/native_tool_call.zig`: native Chat Completions tool-call mode.
-- `examples/multimodal_inspection.zig`: Responses API image input to typed visual inspection.
-- `examples/support_router.zig`: typed support-ticket routing.
-- `examples/invoice_extraction.zig`: nested invoice extraction with normalized cents.
-- `examples/llm_judge.zig`: typed eval/judge output.
-- `examples/pii_redaction.zig`: PII/secret detection and redaction plan.
-- `examples/query_understanding.zig`: natural-language query to search filters.
-- `examples/batch_extract.zig`: batch extraction with `session.reset()` lifetimes.
-- `examples/responses_tool_call.zig`: Responses API required tool-call mode.
-- `examples/classify_union.zig`: simple tagged-union classification.
-
-## Provider adapter contract
-
-A provider is any type implementing:
-
-```zig
-pub fn completeStructured(
-    self: *Provider,
-    allocator: std.mem.Allocator,
-    request: Request,
-    schema: instructor.StructuredSchema,
-    comptime options: instructor.Options,
-) !instructor.Completion;
-
-pub fn appendRetry(
-    self: *Provider,
-    allocator: std.mem.Allocator,
-    request: *Request,
-    retry: instructor.RetryMessage,
-) !void;
-```
-
-Optional hooks:
-
-```zig
-pub fn deinitRequest(self: *Provider, allocator: std.mem.Allocator, request: *Request) void;
-pub fn diagnostic(self: *const Provider) instructor.Diagnostic;
-```
-
-`appendRetry` receives borrowed slices. Providers must copy retry data if retaining it after returning.
+Results include text and raw response data alongside token usage. Use `instructor.printError(err, &ai)` to inspect provider diagnostics after a failure.
 
 ## Scope
 
-This package orchestrates schema generation, provider calls, parsing, validation, and retry. `jsonschema.zig` emits schemas and validates parsed Zig values for supported metadata; provider adapters own transport and retry-message mutation.
+The common client supports buffered text responses and typed parsing. It does not provide full native SDK coverage. There is no streaming or async API. Partial structured results, general tool conversations, multimodal input, and Vertex routing are not supported. Do not run calls concurrently on one client.
+
+The existing lower-level provider and `Session` APIs remain available for their supported extraction modes and image inputs. See [the API reference](docs/api.md), [existing examples](examples), and [the new client guide](docs/client.md).
+
+Generated SDK files and dependency pins are unchanged. Instructor adapters use the generated SDKs without requiring handwritten changes to them.
 
 ## Build
 
 ```sh
 zig build test
-zig build examples
+zig build test -Doptimize=ReleaseSafe
+zig build docs
 ```

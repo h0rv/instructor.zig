@@ -3,6 +3,9 @@ const anthropic = @import("anthropic");
 const jsonschema = @import("jsonschema");
 const types = @import("../core/types.zig");
 const Options = @import("../core/options.zig").Options;
+const transport_api = @import("../transport.zig");
+const request_options = @import("../request_options.zig");
+pub const QueryParam = request_options.QueryParam;
 
 pub const api = anthropic;
 
@@ -23,6 +26,9 @@ pub const Client = struct {
     sdk: anthropic.Client,
     api_key: []const u8,
     max_tokens: u32,
+    /// Borrowed. The caller owns the transport context and its cleanup.
+    transport: ?transport_api.Transport,
+    max_response_bytes: usize,
     last_status: ?std.http.Status = null,
     last_error_body: ?[]u8 = null,
 
@@ -47,6 +53,8 @@ pub const Client = struct {
         base_url: []const u8 = "https://api.anthropic.com",
         /// Required by /messages. A request can override this default.
         max_tokens: u32 = 4096,
+        transport: ?transport_api.Transport = null,
+        max_response_bytes: usize = 8 * 1024 * 1024,
     };
 
     /// Native Messages request. Sampling controls removed in API 2026-10-21
@@ -55,6 +63,9 @@ pub const Client = struct {
         model: []const u8,
         messages: []const Message,
         max_tokens: ?u32 = null,
+        extra_body: ?std.json.Value = null,
+        extra_headers: []const std.http.Header = &.{},
+        extra_query: []const QueryParam = &.{},
         owned_retry_messages: usize = 0,
 
         pub fn deinit(self: *Request, allocator: std.mem.Allocator) void {
@@ -80,7 +91,14 @@ pub const Client = struct {
         var sdk = anthropic.Client.init(config.allocator, config.io, "");
         sdk.withBaseUrl(config.base_url);
         sdk.default_headers = &.{.{ .name = "anthropic-version", .value = "2026-10-21" }};
-        return .{ .allocator = config.allocator, .sdk = sdk, .api_key = config.api_key, .max_tokens = config.max_tokens };
+        return .{
+            .allocator = config.allocator,
+            .sdk = sdk,
+            .api_key = config.api_key,
+            .max_tokens = config.max_tokens,
+            .transport = config.transport,
+            .max_response_bytes = config.max_response_bytes,
+        };
     }
 
     pub fn deinit(self: *Client) void {
@@ -116,23 +134,57 @@ pub const Client = struct {
         self.clearLastError();
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
-        const body = try buildRequest(arena.allocator(), request, schema, options.mode, self.max_tokens);
-        var headers: std.ArrayList(std.http.Header) = .empty;
-        try headers.appendSlice(arena.allocator(), self.sdk.default_headers);
-        var has_key = false;
-        for (headers.items) |*header| {
-            if (std.ascii.eqlIgnoreCase(header.name, "x-api-key")) {
-                header.value = self.api_key;
-                has_key = true;
-            }
+        const base = try buildRequest(arena.allocator(), request, schema, options.mode, self.max_tokens);
+        const body = try request_options.mergePayload(arena.allocator(), base, request.extra_body, .anthropic, true);
+        return self.dispatch(allocator, arena.allocator(), body, options.mode, schema.name, request);
+    }
+
+    /// Ordinary Messages completion, with no schema or tool configuration.
+    pub fn completeText(self: *Client, allocator: std.mem.Allocator, request: Request) !types.Completion {
+        self.clearLastError();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const base = try buildBaseRequest(arena.allocator(), request, self.max_tokens);
+        const body = try request_options.mergePayload(arena.allocator(), base, request.extra_body, .anthropic, false);
+        // json_schema selects the existing text-block decoder, not a wire mode.
+        return self.dispatch(allocator, arena.allocator(), body, .json_schema, "", request);
+    }
+
+    fn dispatch(self: *Client, allocator: std.mem.Allocator, scratch: std.mem.Allocator, body: Value, mode: types.Mode, name: []const u8, request: Request) !types.Completion {
+        var defaults: std.ArrayList(std.http.Header) = .empty;
+        // Defaults may override the version; auth and JSON headers are assembled
+        // afterward. Explicit per-request headers take precedence over all three.
+        try defaults.append(scratch, .{ .name = "anthropic-version", .value = "2026-10-21" });
+        if (self.sdk.organization) |value| try defaults.append(scratch, .{ .name = "OpenAI-Organization", .value = value });
+        if (self.sdk.project) |value| try defaults.append(scratch, .{ .name = "OpenAI-Project", .value = value });
+        try defaults.appendSlice(scratch, self.sdk.default_headers);
+        try defaults.appendSlice(scratch, &.{
+            .{ .name = "x-api-key", .value = self.api_key },
+            .{ .name = "Content-Type", .value = "application/json" },
+            .{ .name = "Accept", .value = "application/json" },
+        });
+        const headers = try request_options.mergeHeaders(scratch, defaults.items, request.extra_headers);
+        const payload = try std.json.Stringify.valueAlloc(scratch, body, .{});
+        const endpoint = try request_options.endpointUrl(scratch, self.sdk.base_url, "/v1/messages");
+        const url = try request_options.appendQuery(scratch, endpoint, request.extra_query);
+        if (self.transport) |transport| {
+            var raw = try transport.send(self.sdk.io, allocator, .{
+                .method = .POST,
+                .url = url,
+                .headers = headers,
+                .body = payload,
+                .max_response_bytes = self.max_response_bytes,
+            });
+            defer raw.deinit();
+            return self.receive(allocator, raw.status, raw.body, mode, name);
         }
-        if (!has_key) try headers.append(arena.allocator(), .{ .name = "x-api-key", .value = self.api_key });
+        // SDK extras replace its automatic headers rather than duplicating them.
         const previous_headers = self.sdk.default_headers;
-        self.sdk.default_headers = headers.items;
+        self.sdk.default_headers = &.{};
         defer self.sdk.default_headers = previous_headers;
-        var raw = try anthropic.postJsonRaw(&self.sdk, "/v1/messages", body);
+        var raw = try anthropic.requestRawWithExtraHeaders(&self.sdk, .POST, url, payload, headers);
         defer raw.deinit();
-        return self.receive(allocator, raw.status, raw.body, options.mode, schema.name);
+        return self.receive(allocator, raw.status, raw.body, mode, name);
     }
 
     fn receive(
@@ -187,25 +239,9 @@ fn object(allocator: std.mem.Allocator, keys: []const []const u8, values: []cons
 }
 
 /// All intermediate JSON values borrow strings and live in the caller's arena.
-fn buildRequest(
-    allocator: std.mem.Allocator,
-    request: Client.Request,
-    schema: types.StructuredSchema,
-    mode: types.Mode,
-    default_max_tokens: u32,
-) !Value {
-    switch (mode) {
-        .json_schema, .tool_call, .tool_call_required => {},
-        .json_object, .responses_tool_call, .responses_tool_call_required => return Client.Error.UnsupportedMode,
-    }
+fn buildBaseRequest(allocator: std.mem.Allocator, request: Client.Request, default_max_tokens: u32) !Value {
     const max_tokens = request.max_tokens orelse default_max_tokens;
     if (max_tokens == 0) return Client.Error.InvalidMaxTokens;
-    const original = try std.json.parseFromSliceLeaky(Value, allocator, schema.schema_json, .{
-        .duplicate_field_behavior = .use_last,
-    });
-    const remote_schema = try remoteSchema(allocator, original, 0);
-    if (remote_schema != .object or !isString(remote_schema.object.get("type"), "object")) return Client.Error.UnsupportedSchema;
-
     var messages: Value = .{ .array = .init(allocator) };
     var system: Value = .{ .array = .init(allocator) };
     for (request.messages) |message| {
@@ -220,6 +256,26 @@ fn buildRequest(
         string(request.model), .{ .integer = max_tokens }, messages,
     });
     if (system.array.items.len != 0) try body.object.put(allocator, "system", system);
+    return body;
+}
+
+fn buildRequest(
+    allocator: std.mem.Allocator,
+    request: Client.Request,
+    schema: types.StructuredSchema,
+    mode: types.Mode,
+    default_max_tokens: u32,
+) !Value {
+    switch (mode) {
+        .json_schema, .tool_call, .tool_call_required => {},
+        .json_object, .responses_tool_call, .responses_tool_call_required => return Client.Error.UnsupportedMode,
+    }
+    var body = try buildBaseRequest(allocator, request, default_max_tokens);
+    const original = try std.json.parseFromSliceLeaky(Value, allocator, schema.schema_json, .{
+        .duplicate_field_behavior = .use_last,
+    });
+    const remote_schema = try remoteSchema(allocator, original, 0);
+    if (remote_schema != .object or !isString(remote_schema.object.get("type"), "object")) return Client.Error.UnsupportedSchema;
     switch (mode) {
         .json_schema => {
             const format = try object(allocator, &.{ "type", "schema" }, &.{ string("json_schema"), remote_schema });
@@ -603,7 +659,422 @@ fn allocationExercise(allocator: std.mem.Allocator) !void {
 }
 
 test "anthropic allocation failure cleanup for request retries responses and diagnostics" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationExercise, .{});
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), allocationExercise, .{});
+}
+
+const ExtrasProbe = struct {
+    structured: bool,
+    override_auth: bool,
+    calls: usize = 0,
+    failure: ?anyerror = null,
+
+    fn check(self: *@This(), url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) !void {
+        self.calls += 1;
+        try std.testing.expectEqualStrings("offline://anthropic/v1/messages?existing=1&a%26b=x%20y%2B%23&a%26b=two#fragment", url);
+        var keys: usize = 0;
+        var content_types: usize = 0;
+        var versions: usize = 0;
+        for (headers) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, "x-api-key")) {
+                keys += 1;
+                try std.testing.expectEqualStrings(if (self.override_auth) "X-aPi-KeY" else "x-api-key", header.name);
+                try std.testing.expectEqualStrings(if (self.override_auth) "custom auth" else "offline", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
+                content_types += 1;
+                try std.testing.expectEqualStrings("cOnTeNt-TyPe", header.name);
+                try std.testing.expectEqualStrings("application/custom+json", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "anthropic-version")) {
+                versions += 1;
+                try std.testing.expectEqualStrings("custom-version", header.value);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), keys);
+        try std.testing.expectEqual(@as(usize, 1), content_types);
+        try std.testing.expectEqual(@as(usize, 1), versions);
+        const parsed = try std.json.parseFromSlice(Value, std.testing.allocator, payload.?, .{ .parse_numbers = false, .duplicate_field_behavior = .@"error" });
+        defer parsed.deinit();
+        const body = parsed.value.object;
+        try std.testing.expectEqualStrings(Client.default_model, body.get("model").?.string);
+        const nested = body.get("unknown").?.object;
+        try std.testing.expectEqualStrings("1.234567890123456789e100", nested.get("number").?.number_string);
+        try std.testing.expectEqualStrings("nested", nested.get("model").?.string);
+        try std.testing.expectEqualStrings("kept", nested.get("format").?.string);
+        try std.testing.expectEqualStrings("777", body.get("max_tokens").?.number_string);
+        try std.testing.expect(!body.get("stream").?.bool);
+        const config = body.get("output_config").?.object;
+        try std.testing.expectEqualStrings("high", config.get("effort").?.string);
+        if (self.structured) try std.testing.expect(config.contains("format"));
+    }
+
+    fn observe(ctx: ?*anyopaque, _: std.http.Method, url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        self.check(url, headers, payload) catch |err| {
+            self.failure = err;
+        };
+    }
+
+    fn send(ctx: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, request: transport_api.Request) !transport_api.Response {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        try self.check(request.url, request.headers, request.body);
+        return .{ .allocator = allocator, .status = .ok, .body = try allocator.dupe(u8, test_text_response) };
+    }
+};
+
+fn extrasExercise(allocator: std.mem.Allocator, comptime structured: bool, comptime legacy: bool, override_auth: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const extra = try std.json.parseFromSliceLeaky(Value, arena.allocator(),
+        \\{"unknown":{"number":1.234567890123456789e100,"model":"nested","format":"kept"},"max_tokens":777,"output_config":{"effort":"high"},"stream":false}
+    , .{ .parse_numbers = false });
+    var probe: ExtrasProbe = .{ .structured = structured, .override_auth = override_auth };
+    var client = Client.init(.{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .api_key = "offline",
+        .base_url = "offline://anthropic/?existing=1#fragment",
+        .transport = if (legacy) null else .{ .ctx = &probe, .send_fn = ExtrasProbe.send },
+    });
+    defer client.deinit();
+    const defaults = [_]std.http.Header{
+        .{ .name = "anthropic-version", .value = "old" },
+        .{ .name = "ANTHROPIC-VERSION", .value = "stale duplicate" },
+        .{ .name = "Content-Type", .value = "stale" },
+        .{ .name = "X-Api-Key", .value = "stale key" },
+    };
+    client.sdk.default_headers = &defaults;
+    if (legacy) client.sdk.http_observer = .{ .ctx = &probe, .onRequest = ExtrasProbe.observe, .onResponse = null, .onError = null };
+    var request = test_request;
+    request.extra_body = extra;
+    const overrides = [_]std.http.Header{
+        .{ .name = "cOnTeNt-TyPe", .value = "application/custom+json" },
+        .{ .name = "Anthropic-Version", .value = "custom-version" },
+        .{ .name = "X-aPi-KeY", .value = "custom auth" },
+    };
+    request.extra_headers = overrides[0..if (override_auth) 3 else 2];
+    request.extra_query = &.{ .{ .name = "a&b", .value = "x y+#" }, .{ .name = "a&b", .value = "two" } };
+    if (legacy) {
+        const result = if (structured) client.completeStructured(allocator, request, test_schema, .{}) else client.completeText(allocator, request);
+        if (result) |value| {
+            var completion = value;
+            completion.deinit(allocator);
+            return error.ExpectedOfflineError;
+        } else |err| switch (err) {
+            error.UnsupportedUriScheme => {},
+            else => return err,
+        }
+        if (probe.failure) |err| return err;
+    } else {
+        var completion = if (structured) try client.completeStructured(allocator, request, test_schema, .{}) else try client.completeText(allocator, request);
+        defer completion.deinit(allocator);
+        try std.testing.expectEqualStrings("{\"age\":42}", completion.text);
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@intFromPtr(&defaults), @intFromPtr(client.sdk.default_headers.ptr));
+    try std.testing.expectEqualStrings("old", defaults[0].value);
+}
+
+test "anthropic extras pass through injected and legacy observer ordinary and structured paths" {
+    inline for (.{ false, true }) |structured| {
+        inline for (.{ false, true }) |legacy| {
+            try extrasExercise(std.testing.allocator, structured, legacy, true);
+            try extrasExercise(std.testing.allocator, structured, legacy, false);
+        }
+    }
+}
+
+test "anthropic extras reject envelope streaming schema collisions and header injection before dispatch" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var fake: FakeTransport = .{};
+    var client = fakeClient(std.testing.allocator, &fake);
+    defer client.deinit();
+    inline for (.{ "{\"model\":\"other\"}", "{\"input\":[]}", "{\"messages\":[]}" }) |json| {
+        var request = test_request;
+        request.extra_body = try std.json.parseFromSliceLeaky(Value, arena.allocator(), json, .{});
+        try std.testing.expectError(error.ReservedBodyField, client.completeText(std.testing.allocator, request));
+        try std.testing.expectError(error.ReservedBodyField, client.completeStructured(std.testing.allocator, request, test_schema, .{}));
+    }
+    inline for (.{ "{\"output_config\":null}", "{\"output_config\":{\"format\":{}}}", "{\"tools\":[]}", "{\"tool_choice\":null}" }) |json| {
+        var request = test_request;
+        request.extra_body = try std.json.parseFromSliceLeaky(Value, arena.allocator(), json, .{});
+        try std.testing.expectError(error.ReservedBodyField, client.completeStructured(std.testing.allocator, request, test_schema, .{}));
+        try std.testing.expectError(error.ReservedBodyField, client.completeStructured(std.testing.allocator, request, test_schema, .{ .mode = .tool_call_required }));
+    }
+    inline for (.{ "{\"stream\":true}", "{\"stream\":0}" }) |json| {
+        var request = test_request;
+        request.extra_body = try std.json.parseFromSliceLeaky(Value, arena.allocator(), json, .{});
+        try std.testing.expectError(error.UnsupportedStreaming, client.completeText(std.testing.allocator, request));
+        try std.testing.expectError(error.UnsupportedStreaming, client.completeStructured(std.testing.allocator, request, test_schema, .{}));
+    }
+    var request = test_request;
+    request.extra_headers = &.{.{ .name = "X-Header", .value = "bad\r\nInjected: true" }};
+    try std.testing.expectError(error.InvalidHeader, client.completeText(std.testing.allocator, request));
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+}
+
+test "anthropic extras clean up all injected and legacy allocation failures" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    inline for (.{ false, true }) |legacy| {
+        inline for (.{ false, true }) |structured| {
+            const Exercise = struct {
+                fn run(allocator: std.mem.Allocator) !void {
+                    try extrasExercise(allocator, structured, legacy, true);
+                }
+            };
+            try std.testing.checkAllAllocationFailures(no_resize.allocator(), Exercise.run, .{});
+        }
+    }
+}
+
+const FakeTransport = struct {
+    calls: usize = 0,
+    response: []const u8 = test_text_response,
+    status: std.http.Status = .ok,
+    failure: ?anyerror = null,
+    model: []const u8 = Client.default_model,
+    max_tokens: u32 = 4096,
+    system_count: usize = 2,
+    mode: ?types.Mode = null,
+    version: []const u8 = "2026-10-21",
+    beta: ?[]const u8 = null,
+    limit: usize = 8 * 1024 * 1024,
+
+    fn transport(self: *@This()) transport_api.Transport {
+        return .{ .ctx = self, .send_fn = send };
+    }
+
+    fn send(ctx: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, request: transport_api.Request) !transport_api.Response {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        self.calls += 1;
+        try std.testing.expectEqual(std.http.Method.POST, request.method);
+        try std.testing.expectEqualStrings("offline://anthropic/v1/messages", request.url);
+        try std.testing.expectEqual(self.limit, request.max_response_bytes);
+        var keys: usize = 0;
+        var versions: usize = 0;
+        var content_types: usize = 0;
+        var betas: usize = 0;
+        for (request.headers) |header| {
+            try std.testing.expect(!std.ascii.eqlIgnoreCase(header.name, "authorization"));
+            if (std.ascii.eqlIgnoreCase(header.name, "x-api-key")) {
+                keys += 1;
+                try std.testing.expectEqualStrings("offline", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "anthropic-version")) {
+                versions += 1;
+                try std.testing.expectEqualStrings(self.version, header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "content-type")) {
+                content_types += 1;
+                try std.testing.expectEqualStrings("application/json", header.value);
+            }
+            if (std.ascii.eqlIgnoreCase(header.name, "anthropic-beta")) {
+                betas += 1;
+                try std.testing.expectEqualStrings(self.beta.?, header.value);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), keys);
+        try std.testing.expectEqual(@as(usize, 1), versions);
+        try std.testing.expectEqual(@as(usize, 1), content_types);
+        try std.testing.expectEqual(@as(usize, if (self.beta != null) 1 else 0), betas);
+        const parsed = try std.json.parseFromSlice(Value, allocator, request.body.?, .{});
+        defer parsed.deinit();
+        const body = parsed.value;
+        try std.testing.expect(isString(body.object.get("model"), self.model));
+        try std.testing.expectEqual(@as(i64, self.max_tokens), body.object.get("max_tokens").?.integer);
+        const messages = body.object.get("messages").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), messages.len);
+        try std.testing.expect(isString(messages[0].object.get("role"), "user"));
+        try std.testing.expect(isString(messages[0].object.get("content"), "Ada is 42."));
+        if (self.system_count == 0) {
+            try std.testing.expect(body.object.get("system") == null);
+        } else {
+            const system = body.object.get("system").?.array.items;
+            try std.testing.expectEqual(self.system_count, system.len);
+            try std.testing.expect(isString(system[0].object.get("text"), "Extract the person."));
+            try std.testing.expect(isString(system[1].object.get("text"), "Preserve the name."));
+        }
+        if (self.mode) |mode| {
+            const remote = if (mode == .json_schema) remoteFromBody(body) else body.object.get("tools").?.array.items[0].object.get("input_schema").?;
+            try std.testing.expect(remote.object.get("properties").?.object.get("age").?.object.get("maximum") == null);
+            if (mode == .json_schema) {
+                try std.testing.expect(body.object.get("tools") == null);
+                try std.testing.expect(body.object.get("tool_choice") == null);
+            } else {
+                try std.testing.expect(body.object.get("output_config") == null);
+                const tool = body.object.get("tools").?.array.items[0];
+                try std.testing.expect(isString(tool.object.get("name"), "Person"));
+                try std.testing.expect(tool.object.get("strict").?.bool);
+                try std.testing.expectEqual(mode == .tool_call_required, body.object.get("tool_choice") != null);
+            }
+        } else {
+            try std.testing.expect(body.object.get("output_config") == null);
+            try std.testing.expect(body.object.get("tools") == null);
+            try std.testing.expect(body.object.get("tool_choice") == null);
+        }
+        if (self.failure) |err| return err;
+        return .{ .allocator = allocator, .status = self.status, .body = try allocator.dupe(u8, self.response) };
+    }
+};
+
+fn fakeClient(allocator: std.mem.Allocator, fake: *FakeTransport) Client {
+    return Client.init(.{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .api_key = "offline",
+        .base_url = "offline://anthropic/",
+        .transport = fake.transport(),
+        .max_response_bytes = fake.limit,
+    });
+}
+
+test "anthropic injected transport plain completion is schema free and preserves controls and headers" {
+    var fake: FakeTransport = .{
+        .response =
+        \\{"stop_reason":"end_turn","content":[{"type":"text","text":"Hello "},{"type":"thinking","thinking":"private"},{"type":"text","text":"world!"}],"usage":{"input_tokens":2,"output_tokens":3}}
+        ,
+        .version = "custom-version",
+        .beta = "custom-beta",
+        .max_tokens = 777,
+        .limit = 8192,
+    };
+    var client = fakeClient(std.testing.allocator, &fake);
+    defer client.deinit();
+    client.max_tokens = 777;
+    const headers = [_]std.http.Header{
+        .{ .name = "Anthropic-Version", .value = "custom-version" },
+        .{ .name = "anthropic-beta", .value = "custom-beta" },
+        .{ .name = "X-Api-Key", .value = "stale-key" },
+        .{ .name = "Content-Type", .value = "text/plain" },
+    };
+    client.sdk.default_headers = &headers;
+    var completion = try client.completeText(std.testing.allocator, test_request);
+    defer completion.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("Hello world!", completion.text);
+    try std.testing.expectEqualStrings(fake.response, completion.raw_response);
+    try std.testing.expectEqual(@as(u64, 5), completion.usage.total_tokens);
+    try std.testing.expectEqual(@intFromPtr(&headers), @intFromPtr(client.sdk.default_headers.ptr));
+    try std.testing.expectEqualStrings("stale-key", headers[2].value);
+    var request = test_request;
+    request.model = "custom-model";
+    request.max_tokens = 123;
+    fake.model = request.model;
+    fake.max_tokens = 123;
+    var override = try client.completeText(std.testing.allocator, request);
+    defer override.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), fake.calls);
+}
+
+test "anthropic injected transport supplies required headers without system and borrows context" {
+    var fake: FakeTransport = .{ .system_count = 0 };
+    const request: Client.Request = .{ .model = Client.default_model, .messages = &.{test_request.messages[1]} };
+    {
+        var client = fakeClient(std.testing.allocator, &fake);
+        defer client.deinit();
+        client.sdk.default_headers = &.{};
+        var completion = try client.completeText(std.testing.allocator, request);
+        defer completion.deinit(std.testing.allocator);
+    }
+    var client = fakeClient(std.testing.allocator, &fake);
+    defer client.deinit();
+    var completion = try client.completeText(std.testing.allocator, request);
+    defer completion.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), fake.calls);
+}
+
+test "anthropic injected transport keeps structured schema and native tools" {
+    inline for (.{ types.Mode.json_schema, types.Mode.tool_call, types.Mode.tool_call_required }) |mode| {
+        var fake: FakeTransport = .{ .mode = mode, .response = if (mode == .json_schema) test_text_response else test_tool_response };
+        var client = fakeClient(std.testing.allocator, &fake);
+        defer client.deinit();
+        var completion = try client.completeStructured(std.testing.allocator, test_request, test_schema, .{ .mode = mode });
+        defer completion.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("{\"age\":42}", completion.text);
+        try std.testing.expectEqual(@as(usize, 1), fake.calls);
+        try std.testing.expect(std.mem.indexOf(u8, test_schema.schema_json, "\"maximum\":130") != null);
+    }
+}
+
+test "anthropic injected transport retains response diagnostics and clears them before send errors" {
+    inline for (.{
+        .{ std.http.Status.too_many_requests, "rate limited", error.ProviderHttpError },
+        .{ std.http.Status.ok, "not json", error.InvalidProviderResponse },
+        .{ std.http.Status.ok, "{\"content\":[]}", error.MissingOutputText },
+        .{ std.http.Status.ok, "{\"error\":{}}", error.ProviderHttpError },
+        .{ std.http.Status.ok, "{\"stop_reason\":\"refusal\"}", error.Refusal },
+        .{ std.http.Status.ok, "{\"content\":[{\"type\":\"refusal\"}]}", error.Refusal },
+        .{ std.http.Status.ok, "{\"stop_reason\":\"max_tokens\"}", error.MaxTokensExceeded },
+        .{ std.http.Status.ok, "{\"stop_reason\":\"pause_turn\"}", error.IncompleteResponse },
+        .{ std.http.Status.ok, "{\"stop_reason\":\"model_context_window_exceeded\"}", error.IncompleteResponse },
+    }) |case| {
+        var fake: FakeTransport = .{ .status = case[0], .response = case[1] };
+        var client = fakeClient(std.testing.allocator, &fake);
+        defer client.deinit();
+        try std.testing.expectError(case[2], client.completeText(std.testing.allocator, test_request));
+        try std.testing.expectEqual(case[0], client.lastStatus().?);
+        try std.testing.expectEqualStrings(case[1], client.lastErrorBody().?);
+        try std.testing.expectEqualStrings("anthropic", client.diagnostic().provider);
+        fake.failure = error.OfflineTransportFailure;
+        try std.testing.expectError(error.OfflineTransportFailure, client.completeText(std.testing.allocator, test_request));
+        try std.testing.expect(client.lastStatus() == null);
+        try std.testing.expect(client.lastErrorBody() == null);
+        fake.failure = null;
+        fake.response = test_text_response;
+        fake.status = .ok;
+        var completion = try client.completeText(std.testing.allocator, test_request);
+        defer completion.deinit(std.testing.allocator);
+        try std.testing.expect(client.lastErrorBody() == null);
+    }
+}
+
+test "anthropic injected transport rejects unsupported inputs and enforces response limit" {
+    var fake: FakeTransport = .{};
+    var client = fakeClient(std.testing.allocator, &fake);
+    defer client.deinit();
+    var request = test_request;
+    request.max_tokens = 0;
+    try std.testing.expectError(error.InvalidMaxTokens, client.completeText(std.testing.allocator, request));
+    request.messages = &.{.{ .role = .user, .content = "image", .images = &.{.{ .url = "offline://image" }} }};
+    request.max_tokens = 1;
+    try std.testing.expectError(error.UnsupportedImages, client.completeText(std.testing.allocator, request));
+    try std.testing.expectError(error.UnsupportedMode, client.completeStructured(std.testing.allocator, test_request, test_schema, .{ .mode = .json_object }));
+    try std.testing.expectEqual(@as(usize, 0), fake.calls);
+    fake.limit = 1;
+    client.max_response_bytes = 1;
+    try std.testing.expectError(error.ResponseTooLarge, client.completeText(std.testing.allocator, test_request));
+    try std.testing.expect(client.lastStatus() == null);
+    try std.testing.expect(client.lastErrorBody() == null);
+}
+
+fn injectedAllocationExercise(allocator: std.mem.Allocator) !void {
+    var fake: FakeTransport = .{};
+    var client = fakeClient(allocator, &fake);
+    defer client.deinit();
+    var plain = try client.completeText(allocator, test_request);
+    defer plain.deinit(allocator);
+    fake.mode = .tool_call_required;
+    fake.response = test_tool_response;
+    var tool = try client.completeStructured(allocator, test_request, test_schema, .{ .mode = .tool_call_required });
+    defer tool.deinit(allocator);
+    fake.mode = null;
+    fake.status = .bad_request;
+    fake.response = "bad request";
+    _ = client.completeText(allocator, test_request) catch |err| switch (err) {
+        error.ProviderHttpError => return,
+        else => return err,
+    };
+    return error.ExpectedProviderError;
+}
+
+test "anthropic injected transport cleans up all allocation failure paths" {
+    // Arena growth can resize backing buffers depending on SafeAllocator bucket
+    // state left by earlier runs, changing the number of allocation failure points.
+    // Reject both resize and remap so growth always takes the allocation fallback.
+    // The checker's inner FailingAllocator still fails every allocation in turn.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), injectedAllocationExercise, .{});
 }
 
 const OfflineProvider = struct {

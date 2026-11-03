@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+Added a common `Client` with resource fields `client.responses.create` and `client.responses.parse` for text input. Use `client.messages.create` and `client.messages.parse` for text conversations. Both resources use the configured provider and endpoint through the same adapters. They do not change the HTTP endpoint or provide full native SDK coverage.
+
+Both resources offer `parseWith` with compile-time `ParseOptions`. Applications with a request arena can use `parseInto` or `parseIntoWith`. Owned results have explicit cleanup and can outlive the client. The client accepts an injectable HTTP transport and chooses provider schema defaults internally. Existing low-level provider and `Session` APIs remain available.
+
+The client owns stable heap state. Resource handles borrow that state rather than a pointer to the outer client. They remain valid after moving the client, but must not outlive client cleanup. Do not copy an active client owner.
+
+Added `extra_body`, `extra_headers`, and `extra_query` to request parameters. Client configuration supports deeply copied defaults in `extra_body` and `extra_query`, alongside the existing copied `headers`. JSON objects merge recursively. Request query entries replace defaults by raw name and preserve repeated request names. Query components use RFC 3986 encoding. Request headers override defaults, including authentication and content type, without case-sensitive duplicates. Invalid headers return `error.InvalidHeader`.
+
+All three HTTP adapters pass extra body fields through for ordinary and typed requests, including existing provider SDK paths. Unknown body keys are not silently dropped. Non-object extras return `error.InvalidExtraBody`. Routing and input fields remain protected with `error.ReservedBodyField`. Typed parsing also protects schema fields while allowing siblings such as `text.verbosity` and `output_config.effort`. `stream: true` or a non-boolean value returns `error.UnsupportedStreaming`. `stream: false` is allowed. Local validation and retries remain in place.
+
+Added a bounded standard-library transport, an adapter for borrowed standard-library clients, and offline examples. Generated SDK files and dependency pins are unchanged. Streaming and Vertex support are not part of this first common API.
+
 ## 0.2.0
 
 This release requires Zig 0.17.0. Existing Zig 0.16 users should keep their earlier release pins.

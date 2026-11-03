@@ -1304,8 +1304,11 @@ fn completionAllocationTest(allocator: std.mem.Allocator, endpoint: Client.Endpo
 }
 
 test "openai completion and diagnostics propagate all allocation failures" {
+    // Disable in-place growth so allocator bucket state cannot change the
+    // allocation count between the baseline and exhaustive failure passes.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     inline for (.{ Client.Endpoint.responses, .chat_completions }) |endpoint| {
-        try std.testing.checkAllAllocationFailures(std.testing.allocator, completionAllocationTest, .{endpoint});
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), completionAllocationTest, .{endpoint});
     }
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
     var script: ScriptedTransport = .{ .response = "{\"output\":[{\"content\":[{\"type\":\"refusal\",\"refusal\":\"no\"}]}]}" };

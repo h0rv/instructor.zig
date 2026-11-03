@@ -326,5 +326,7 @@ fn exerciseOwnedAllocationFailures(allocator: std.mem.Allocator) !void {
 }
 
 test "owned completion and extraction release partial allocations on every failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseOwnedAllocationFailures, .{});
+    // Force arena growth through allocation, not address-dependent resize/remap.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), exerciseOwnedAllocationFailures, .{});
 }

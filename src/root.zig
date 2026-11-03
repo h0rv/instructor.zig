@@ -1,5 +1,19 @@
 const core = @import("core/mod.zig");
 const providers = @import("providers/mod.zig");
+const client = @import("client.zig");
+
+pub const http = @import("transport.zig");
+pub const Client = client.Client;
+pub const ClientConfig = client.Config;
+pub const EnvConfig = client.EnvConfig;
+pub const Provider = client.Provider;
+pub const Backend = client.Backend;
+pub const Request = client.Request;
+pub const Message = client.Message;
+pub const Role = client.Role;
+pub const Response = client.Response;
+pub const Owned = client.Owned;
+pub const ExtractionOptions = client.ExtractionOptions;
 
 pub const Mode = core.Mode;
 pub const Usage = core.Usage;
@@ -36,4 +50,6 @@ pub const provider = providers;
 test {
     _ = core;
     _ = providers;
+    _ = client;
+    _ = http;
 }

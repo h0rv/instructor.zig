@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Added a common `Client` for buffered text completion and typed extraction across the existing providers. It accepts an injectable HTTP transport and chooses provider schema defaults internally. Owned results have explicit cleanup and can outlive the client. Applications with a request arena can use `extractInto` instead.
+
+Added a bounded standard-library transport, an adapter for borrowed standard-library clients, and offline examples. Generated SDK files and dependency pins are unchanged. Streaming and Vertex support are not part of this first common API.
+
 ## 0.2.0
 
 This release requires Zig 0.17.0. Existing Zig 0.16 users should keep their earlier release pins.

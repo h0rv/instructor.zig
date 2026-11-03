@@ -72,12 +72,17 @@ pub fn build(b: *std.Build) void {
     const responses_tool_call_example = addExample(b, mod, target, optimize, "responses-tool-call-example", "examples/responses_tool_call.zig", "run-responses-tool-call", "Run Responses tool-call example");
     const classify_union_example = addExample(b, mod, target, optimize, "classify-union-example", "examples/classify_union.zig", "run-classify-union", "Run tagged-union classifier example");
 
+    const client_example = addExample(b, mod, target, optimize, "client-example", "examples/client.zig", "run-client", "Run unified client with Anthropic credentials");
+    const custom_transport_example = addExample(b, mod, target, optimize, "custom-transport-example", "examples/custom_transport.zig", "run-custom-transport", "Run unified client with an offline custom transport");
+
     const anthropic_example = addExample(b, mod, target, optimize, "anthropic-example", "examples/anthropic.zig", "run-anthropic", "Run Anthropic example");
     const build_anthropic = b.step("anthropic-example", "Build Anthropic example without credentials");
     build_anthropic.dependOn(anthropic_example);
 
     const examples_step = b.step("examples", "Build examples");
     examples_step.dependOn(anthropic_example);
+    examples_step.dependOn(client_example);
+    examples_step.dependOn(custom_transport_example);
     examples_step.dependOn(openrouter_example);
     examples_step.dependOn(tool_planner_example);
     examples_step.dependOn(exact_citations_example);

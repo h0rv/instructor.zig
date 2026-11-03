@@ -1,4 +1,6 @@
-# `instructor.zig` API spec
+# Session and provider API
+
+These notes describe the retained lower-level API. For the common LLM client, see [the client guide](client.md).
 
 Target Zig version: `0.17.0` stable APIs.
 

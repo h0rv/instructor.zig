@@ -468,6 +468,21 @@ const State = struct {
 pub const Decisions = struct {
     state: *State,
 
+    /// Ask one yes/no question and discard response metadata.
+    /// Use parse(bool, ...) to inspect the probability.
+    pub fn condition(self: Decisions, params: decisions_mod.ConditionParams) !bool {
+        var result = try self.parse(bool, .{
+            .input = params.input,
+            .questions = .{ .instructions = params.instructions, .threshold = params.threshold },
+            .model = params.model,
+            .extra_body = params.extra_body,
+            .extra_headers = params.extra_headers,
+            .extra_query = params.extra_query,
+        });
+        defer result.deinit();
+        return result.value;
+    }
+
     pub fn create(self: Decisions, params: decisions_mod.CreateParams) !decisions_mod.Response {
         return self.state.createDecision(params);
     }

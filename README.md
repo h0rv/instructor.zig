@@ -78,7 +78,7 @@ Run [this example](examples/client.zig) with `zig build run-client`. It makes a 
 | Extract nested objects and arrays. | [Invoice with line items](examples/invoice_extraction.zig). |
 | Process reviews one at a time and free each result. | [Batch extraction](examples/batch_extract.zig) with `Session.reset()`. |
 | Classify text into typed cases. | [Tagged union classification](examples/classify_union.zig) and [support routing](examples/support_router.zig). |
-| Branch on typed model decisions with probability details. | [Decisions guide](docs/decisions.md), [ticket routing](examples/decisions.zig), [smart if](examples/smart_if.zig), and [offline example](examples/decisions_offline.zig). |
+| Use model decisions in `if` and `switch`. | [Decisions guide](docs/decisions.md) and [ticket routing](examples/decisions.zig). |
 | Request answers with supporting quotes. | [Exact citations](examples/exact_citations.zig). Check quotes against the source before trusting them. |
 | Extract tasks or propose redactions. | [Meeting actions](examples/action_items.zig) and [PII redaction](examples/pii_redaction.zig). Review redactions before logging sensitive text. |
 | Observe requests and retries. | [Hooks and usage](docs/api.md#hooks). |

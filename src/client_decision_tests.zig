@@ -20,10 +20,12 @@ const Script = struct {
     question_count: usize = 1,
     expected_query: ?[]const u8 = null,
     expect_extras: bool = false,
+    send_error: ?anyerror = null,
 
     fn send(ctx: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, request: http.Request) !http.Response {
         const self: *Script = @ptrCast(@alignCast(ctx.?));
         self.calls += 1;
+        if (self.send_error) |err| return err;
         try std.testing.expectEqual(std.http.Method.POST, request.method);
         const query = std.mem.indexOfScalar(u8, request.url, '?') orelse request.url.len;
         try std.testing.expectEqualStrings("https://example.test/v1/decisions", request.url[0..query]);
@@ -69,8 +71,8 @@ fn config(allocator: std.mem.Allocator, script: *Script) llm.Config {
 }
 
 const input = "The checkout button fails in Safari.";
-const boolean_question: decisions.Questions(bool) = .{ .instructions = "Does the report describe broken behavior?" };
-const triage_questions: decisions.Questions(Triage) = .{
+const boolean_question: decisions.Question(bool) = .{ .instructions = "Does the report describe broken behavior?" };
+const triage_questions: @FieldType(decisions.ParseParams(Triage), "questions") = .{
     .team = .{ .instructions = "Which team owns this ticket?" },
     .urgent = .{ .instructions = "Does this need attention today?", .threshold = 0.8 },
     .severity = .{ .score = .{
@@ -103,11 +105,11 @@ test "decision resource and returned distributions survive client moves and clea
     var script: Script = .{ .body = triage_response, .question_count = 3 };
     var parsed = blk: {
         var original = try llm.Client.init(config(std.testing.allocator, &script));
-        const resource = original.decisions;
+        const questions = decisions.Questions(Triage).init(&original, triage_questions);
         var moved = original;
         original = undefined;
         defer moved.deinit();
-        break :blk try resource.parse(Triage, .{ .input = input, .questions = triage_questions });
+        break :blk try questions.parseDetailed(.{ .input = input });
     };
     defer parsed.deinit();
     try std.testing.expectEqual(Team.billing, parsed.value.team);
@@ -141,6 +143,23 @@ test "decision requests merge copied client defaults and request extras" {
     });
     defer parsed.deinit();
     try std.testing.expect(parsed.value);
+    try std.testing.expect(try client.decisions.condition(.{
+        .input = input,
+        .instructions = boolean_question.instructions,
+        .model = "decision-model",
+        .extra_body = extra.value,
+        .extra_headers = &.{.{ .name = "x-app", .value = "request" }},
+        .extra_query = &.{.{ .name = "route", .value = "new" }},
+    }));
+    const questions = decisions.Questions(bool).init(&client, boolean_question);
+    try std.testing.expect(try questions.parse(.{
+        .input = input,
+        .model = "decision-model",
+        .extra_body = extra.value,
+        .extra_headers = &.{.{ .name = "x-app", .value = "request" }},
+        .extra_query = &.{.{ .name = "route", .value = "new" }},
+    }));
+    try std.testing.expectEqual(@as(usize, 3), script.calls);
 }
 
 test "invalid decision questions and unsupported providers fail before HTTP" {
@@ -180,6 +199,128 @@ test "decision refusals preserve diagnostics and do not retry or report completi
     try std.testing.expectEqual(std.http.Status.created, client.diagnostic().status.?);
     try std.testing.expectEqualStrings(script.body, client.diagnostic().body.?);
     try std.testing.expectEqualSlices(types.HookEvent, &.{ .request_start, .response_received, .parse_error }, log.events[0..log.len]);
+}
+
+test "condition uses the default threshold and includes equality" {
+    var script: Script = .{
+        .body = response_start ++ "[{\"type\":\"predicate\",\"name\":\"decision\",\"probability\":0.5}]" ++ response_end,
+    };
+    var client = try llm.Client.init(config(std.testing.allocator, &script));
+    defer client.deinit();
+    const params: decisions.ConditionParams = .{ .input = input, .instructions = boolean_question.instructions };
+    try std.testing.expect(try client.decisions.condition(params));
+    try std.testing.expect(!try client.decisions.condition(.{
+        .input = input,
+        .instructions = boolean_question.instructions,
+        .threshold = 0.5001,
+    }));
+    try std.testing.expect(try client.decisions.condition(.{
+        .input = input,
+        .instructions = boolean_question.instructions,
+        .threshold = 0.4999,
+    }));
+}
+
+test "condition rejects invalid questions without sending a request" {
+    var script: Script = .{};
+    var client = try llm.Client.init(config(std.testing.allocator, &script));
+    defer client.deinit();
+    try std.testing.expectError(error.EmptyInstructions, client.decisions.condition(.{ .input = input, .instructions = "" }));
+    try std.testing.expectError(error.InvalidThreshold, client.decisions.condition(.{
+        .input = input,
+        .instructions = boolean_question.instructions,
+        .threshold = std.math.nan(f64),
+    }));
+    try std.testing.expectEqual(@as(usize, 0), script.calls);
+}
+
+test "condition propagates refusals malformed answers and HTTP failures" {
+    const cases = [_]struct { body: []const u8, status: std.http.Status, expected: anyerror }{
+        .{ .body = response_start ++ "[{\"type\":\"refusal\",\"name\":\"decision\"}]" ++ response_end, .status = .ok, .expected = error.Refusal },
+        .{ .body = response_start ++ "[{\"type\":\"predicate\",\"name\":\"wrong\",\"probability\":0.5}]" ++ response_end, .status = .ok, .expected = error.InvalidDecisionResponse },
+        .{ .body = "{\"error\":{\"message\":\"rate limited\"}}", .status = .too_many_requests, .expected = error.ProviderHttpError },
+    };
+    for (cases) |case| {
+        var script: Script = .{ .body = case.body, .status = case.status };
+        var client = try llm.Client.init(config(std.testing.allocator, &script));
+        defer client.deinit();
+        try std.testing.expectError(case.expected, client.decisions.condition(.{
+            .input = input,
+            .instructions = boolean_question.instructions,
+        }));
+        try std.testing.expectEqual(@as(usize, 1), script.calls);
+    }
+}
+
+test "question sets return independent values without response cleanup at the call site" {
+    var script: Script = .{ .body = triage_response, .question_count = 3 };
+    const value = blk: {
+        var client = try llm.Client.init(config(std.testing.allocator, &script));
+        defer client.deinit();
+        const questions = decisions.Questions(Triage).init(&client, triage_questions);
+        break :blk try questions.parse(.{ .input = input });
+    };
+    try std.testing.expectEqual(Team.billing, value.team);
+    try std.testing.expect(value.urgent);
+    try std.testing.expectApproxEqAbs(@as(f64, 5.5), value.severity, 0.000001);
+}
+
+test "question sets and conditions forward model overrides" {
+    var script: Script = .{};
+    var cfg = config(std.testing.allocator, &script);
+    cfg.model = "other-model";
+    var client = try llm.Client.init(cfg);
+    defer client.deinit();
+    const questions = decisions.Questions(bool).init(&client, boolean_question);
+    try std.testing.expectEqual(@as(usize, 0), script.calls);
+    try std.testing.expect(try questions.parse(.{ .input = input, .model = "decision-model" }));
+    try std.testing.expect(try client.decisions.condition(.{
+        .input = input,
+        .instructions = boolean_question.instructions,
+        .model = "decision-model",
+    }));
+    try std.testing.expectEqual(@as(usize, 2), script.calls);
+}
+
+test "value helpers propagate transport errors without converting them to false" {
+    var script: Script = .{ .send_error = error.ConnectionResetByPeer };
+    var client = try llm.Client.init(config(std.testing.allocator, &script));
+    defer client.deinit();
+    const questions = decisions.Questions(bool).init(&client, boolean_question);
+    try std.testing.expectError(error.ConnectionResetByPeer, questions.parse(.{ .input = input }));
+    try std.testing.expectError(error.ConnectionResetByPeer, client.decisions.condition(.{
+        .input = input,
+        .instructions = boolean_question.instructions,
+    }));
+    try std.testing.expectEqual(@as(usize, 2), script.calls);
+}
+
+fn exerciseQuestionSet(allocator: std.mem.Allocator) !void {
+    var script: Script = .{};
+    var client = try llm.Client.init(config(allocator, &script));
+    defer client.deinit();
+    const questions = decisions.Questions(bool).init(&client, boolean_question);
+    try std.testing.expect(try questions.parse(.{ .input = input }));
+}
+
+test "question sets clean up response memory on every allocation failure" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), exerciseQuestionSet, .{});
+}
+
+fn exerciseCondition(allocator: std.mem.Allocator) !void {
+    var script: Script = .{};
+    var client = try llm.Client.init(config(allocator, &script));
+    defer client.deinit();
+    try std.testing.expect(try client.decisions.condition(.{
+        .input = input,
+        .instructions = boolean_question.instructions,
+    }));
+}
+
+test "condition cleans up response memory on every allocation failure" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), exerciseCondition, .{});
 }
 
 fn exercise(allocator: std.mem.Allocator) !void {

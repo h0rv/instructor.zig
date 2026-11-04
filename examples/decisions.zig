@@ -5,29 +5,9 @@ const Team = enum { billing, technical, other };
 const TicketDecision = struct {
     team: Team,
     urgent: bool,
-    blocked_probability: f64,
 };
 
-const questions: instructor.decisions.Questions(TicketDecision) = .{
-    .team = .{
-        .instructions = "Which team should review this support ticket?",
-        .descriptions = &.{
-            .{ .value = .billing, .description = "Charges, invoices, or refunds." },
-            .{ .value = .technical, .description = "Problems using the product." },
-            .{ .value = .other, .description = "Requests outside these categories." },
-        },
-    },
-    .urgent = .{
-        .instructions = "Does the ticket describe an issue that needs attention today?",
-        // Illustrative only. Choose thresholds using labeled tickets.
-        .threshold = 0.8,
-    },
-    .blocked_probability = .{ .predicate = .{
-        .instructions = "Is the customer unable to continue their work?",
-    } },
-};
-
-// This example makes one live request and requires OPENAI_API_KEY.
+// Requires OPENAI_API_KEY and makes one live request.
 pub fn main(init: std.process.Init) !void {
     var client = try instructor.Client.fromEnv(init, .{
         .provider = .openai,
@@ -35,29 +15,27 @@ pub fn main(init: std.process.Init) !void {
     });
     defer client.deinit();
 
-    const ticket = "I was charged twice. Please fix this today. I can still use the product.";
-    var decision = try client.decisions.parse(TicketDecision, .{
-        .input = ticket,
-        .questions = questions,
+    const questions = instructor.decisions.Questions(TicketDecision).init(&client, .{
+        .team = .{ .instructions = "Which team should review this support ticket?" },
+        .urgent = .{
+            .instructions = "Does the ticket need attention today?",
+            .threshold = 0.8,
+        },
     });
-    defer decision.deinit();
 
-    const queue = switch (decision.value.team) {
-        .billing => "billing review",
-        .technical => "technical review",
-        .other => "general review",
+    const ticket = "I was charged twice. Please fix this today.";
+    const decision = try questions.parse(.{ .input = ticket });
+
+    const queue = switch (decision.team) {
+        .billing => "billing",
+        .technical => "technical",
+        .other => "general",
     };
-    std.debug.print("Queue: {s}; selected choice probability: {d:.2}\n", .{
-        queue,
-        decision.details.team.probabilities.get(decision.value.team),
-    });
-    if (decision.value.urgent) {
-        std.debug.print("Flag for attention today.\n", .{});
+    std.debug.print("Queue: {s}\n", .{queue});
+
+    if (decision.urgent) {
+        std.debug.print("Review today.\n", .{});
     } else {
-        std.debug.print("Keep the normal review priority.\n", .{});
+        std.debug.print("Use normal priority.\n", .{});
     }
-    std.debug.print("Urgency probability: {d:.2}; blocked probability: {d:.2}\n", .{
-        decision.details.urgent.probability,
-        decision.value.blocked_probability,
-    });
 }

@@ -77,7 +77,6 @@ pub fn build(b: *std.Build) void {
 
     const decisions_example = addExample(b, mod, target, optimize, "decisions-example", "examples/decisions.zig", "run-decisions", "Route a ticket with OpenAI Decisions");
     const smart_if_example = addExample(b, mod, target, optimize, "smart-if-example", "examples/smart_if.zig", "run-smart-if", "Branch on a typed decision with explicit uncertainty");
-    const decisions_offline_example = addExample(b, mod, target, optimize, "decisions-offline-example", "examples/decisions_offline.zig", "run-decisions-offline", "Run typed decision branches without network access");
 
     const anthropic_example = addExample(b, mod, target, optimize, "anthropic-example", "examples/anthropic.zig", "run-anthropic", "Run Anthropic example");
     const build_anthropic = b.step("anthropic-example", "Build Anthropic example without credentials");
@@ -89,7 +88,6 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(custom_transport_example);
     examples_step.dependOn(decisions_example);
     examples_step.dependOn(smart_if_example);
-    examples_step.dependOn(decisions_offline_example);
     examples_step.dependOn(openrouter_example);
     examples_step.dependOn(tool_planner_example);
     examples_step.dependOn(exact_citations_example);

@@ -65,8 +65,48 @@ fn ScalarDetails(comptime T: type) type {
     };
 }
 
-pub fn Questions(comptime T: type) type {
+fn QuestionFields(comptime T: type) type {
     return Mirrored(T, .questions);
+}
+
+pub const InputParams = struct {
+    input: []const u8,
+    model: ?[]const u8 = null,
+    extra_body: ?std.json.Value = null,
+    extra_headers: []const std.http.Header = &.{},
+    extra_query: []const QueryParam = &.{},
+};
+
+/// Borrows the client and question strings. Initialization makes no request.
+pub fn Questions(comptime T: type) type {
+    const Fields = QuestionFields(T);
+    return struct {
+        resource: @import("client.zig").Decisions,
+        fields: Fields,
+
+        pub fn init(client: *const @import("client.zig").Client, fields: Fields) @This() {
+            return .{ .resource = client.decisions, .fields = fields };
+        }
+
+        /// Return the fixed-size value and free the response.
+        pub fn parse(self: @This(), params: InputParams) !T {
+            var result = try self.parseDetailed(params);
+            defer result.deinit();
+            return result.value;
+        }
+
+        /// Keep probabilities and response data until the result is deinitialized.
+        pub fn parseDetailed(self: @This(), params: InputParams) !Parsed(T) {
+            return self.resource.parse(T, .{
+                .input = params.input,
+                .questions = self.fields,
+                .model = params.model,
+                .extra_body = params.extra_body,
+                .extra_headers = params.extra_headers,
+                .extra_query = params.extra_query,
+            });
+        }
+    };
 }
 
 pub fn Details(comptime T: type) type {
@@ -129,9 +169,19 @@ fn Params(comptime Q: type) type {
     };
 }
 
+pub const ConditionParams = struct {
+    input: []const u8,
+    instructions: []const u8,
+    threshold: f64 = 0.5,
+    model: ?[]const u8 = null,
+    extra_body: ?std.json.Value = null,
+    extra_headers: []const std.http.Header = &.{},
+    extra_query: []const QueryParam = &.{},
+};
+
 pub const CreateParams = Params([]const api.QuestionParam);
 pub fn ParseParams(comptime T: type) type {
-    return Params(Questions(T));
+    return Params(QuestionFields(T));
 }
 
 /// Single owner. Do not deinit copies after transferring ownership.
@@ -214,7 +264,7 @@ fn validateScalar(comptime T: type, question: Question(T)) !void {
     }
 }
 
-fn validateQuestions(comptime T: type, questions: Questions(T)) !void {
+fn validateQuestions(comptime T: type, questions: QuestionFields(T)) !void {
     if (@typeInfo(T) == .@"struct") {
         inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types) |name, F| {
             try validateScalar(F, @field(questions, name));
@@ -224,7 +274,7 @@ fn validateQuestions(comptime T: type, questions: Questions(T)) !void {
 
 /// The allocator must be a caller-owned arena, including on allocation failure.
 /// Instructions, descriptions and levels are borrowed for the request lifetime.
-pub fn buildQuestions(comptime T: type, allocator: Allocator, questions: Questions(T)) ![]const api.QuestionParam {
+pub fn buildQuestions(comptime T: type, allocator: Allocator, questions: QuestionFields(T)) ![]const api.QuestionParam {
     try validateQuestions(T, questions);
     const result = try allocator.alloc(api.QuestionParam, count(T));
     if (@typeInfo(T) == .@"struct") {
@@ -265,7 +315,7 @@ const probability_tolerance = 1e-3;
 
 /// All answers must match in order. No partial result or default is returned.
 /// This performs no allocations and does not parse generated text.
-pub fn decode(comptime T: type, response: api.DecisionResponse, questions: Questions(T)) !struct { value: T, details: Details(T) } {
+pub fn decode(comptime T: type, response: api.DecisionResponse, questions: QuestionFields(T)) !struct { value: T, details: Details(T) } {
     try validateQuestions(T, questions);
     if (response.answers.len != count(T)) return error.InvalidDecisionResponse;
     if (@typeInfo(T) == .@"struct") {
@@ -520,14 +570,14 @@ test "floats explicitly select predicate or score and affine scale preserves raw
 
 test "flat struct mirrors exact field names and decodes all supported kinds" {
     const Output = struct { approved: bool, @"route.kind": TestChoice, relevance: f32, severity: f64 };
-    const questions: Questions(Output) = .{
+    const questions: QuestionFields(Output) = .{
         .approved = .{ .instructions = "Approve?" },
         .@"route.kind" = .{ .instructions = "Route" },
         .relevance = .{ .predicate = .{ .instructions = "Relevant?" } },
         .severity = test_score_question,
     };
     comptime {
-        for (@typeInfo(Output).@"struct".field_names, @typeInfo(Questions(Output)).@"struct".field_names, @typeInfo(Details(Output)).@"struct".field_names) |a, b, c| {
+        for (@typeInfo(Output).@"struct".field_names, @typeInfo(QuestionFields(Output)).@"struct".field_names, @typeInfo(Details(Output)).@"struct".field_names) |a, b, c| {
             if (!std.mem.eql(u8, a, b) or !std.mem.eql(u8, a, c)) @compileError("Field names changed");
         }
     }
@@ -627,7 +677,7 @@ test "answer count names order duplicates refusal and raw fallback are rejected"
     try expectInvalidChoice(raw);
     try expectInvalidScore(raw);
     const Output = struct { first: bool, second: bool };
-    const questions: Questions(Output) = .{ .first = q, .second = q };
+    const questions: QuestionFields(Output) = .{ .first = q, .second = q };
     var answers = [_]api.AnswerResource{ testPredicate(0.8), testPredicate(0.2) };
     answers[0].predicate.name = "first";
     answers[1].predicate.name = "first";
@@ -868,7 +918,7 @@ fn testFieldNames(comptime n: usize) [n][:0]const u8 {
 test "maximum 400 question names stay unique and ordered without output defaults" {
     const names = comptime testFieldNames(400);
     const Output = @Struct(.auto, null, &names, &@as([400]type, @splat(bool)), &@splat(.{}));
-    var questions: Questions(Output) = undefined;
+    var questions: QuestionFields(Output) = undefined;
     var answers: [400]api.AnswerResource = undefined;
     inline for (names, &answers, 0..) |name, *answer, i| {
         @field(questions, name) = .{ .instructions = "Yes?" };

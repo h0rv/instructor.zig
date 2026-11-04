@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-Added `client.decisions.create` and `client.decisions.parse` for the OpenAI Decisions endpoint. Typed parsing supports booleans, exhaustive enums, and `f32` or `f64`, either alone or in a flat struct. Independent questions share one request. Results include probability details and the full native SDK response alongside the raw JSON and usage. Applications control thresholds and branches. An uncertain answer does not trigger a retry. Added live routing and relevance examples, a deterministic offline example, and a Decisions guide.
+Added OpenAI Decisions support. Use `client.decisions.condition` for a boolean branch, or define reusable `Questions(T)` and call `parse` to get a value with automatic response cleanup. Use `parseDetailed` for probabilities and the native response. Added ticket routing and relevance examples.
 
 ## 0.3.0
 

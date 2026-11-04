@@ -6,6 +6,8 @@ Define a struct and call `parse`. Instructor generates its JSON Schema and valid
 
 Use the same `client.responses.parse` or `client.messages.parse` calls with OpenAI Responses, OpenAI-compatible Chat Completions, or Anthropic Messages. Choose the provider and endpoint in client configuration.
 
+Use `client.decisions` with OpenAI's Decisions API for boolean conditions and typed routing.
+
 ## Install
 
 Add the dependency:
@@ -68,6 +70,32 @@ Coffee mug: 12.50, in stock=true
 The result owns its memory. It remains valid after client cleanup if the backing allocator is still alive. Deinitialize each owner once and do not copy an active owner.
 
 Run [this example](examples/client.zig) with `zig build run-client`. It makes a live request and may retry. To try the same extraction without credentials or network access, run `zig build run-custom-transport`.
+
+## Decisions API
+
+Ask a fixed question about text and use the answer in an ordinary Zig branch:
+
+```zig
+var client = try instructor.Client.fromEnv(init, .{
+    .provider = .openai,
+    .model = "gpt-6-luna",
+});
+defer client.deinit();
+
+if (try client.decisions.condition(.{
+    .input = passage,
+    .instructions = "Does this passage answer the search query?",
+    .threshold = 0.8,
+})) {
+    includePassage();
+} else {
+    omitPassage();
+}
+```
+
+For several answers, define `Questions(T)` once and call `questions.parse(...)`. It returns the value and handles response cleanup. Use `parseDetailed(...)` when you need probabilities.
+
+See [the Decisions guide](docs/decisions.md) and [ticket routing example](examples/decisions.zig). OpenAI is the supported backend. Jev uses TypeSafe's separate API and needs its own adapter.
 
 ## What you can build
 

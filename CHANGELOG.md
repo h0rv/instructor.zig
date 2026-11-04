@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+Added `client.decisions.create` and `client.decisions.parse` for the OpenAI Decisions endpoint. Typed parsing supports booleans, exhaustive enums, and `f32` or `f64`, either alone or in a flat struct. Independent questions share one request. Results include probability details and the full native SDK response alongside the raw JSON and usage. Applications control thresholds and branches. An uncertain answer does not trigger a retry. Added live routing and relevance examples, a deterministic offline example, and a Decisions guide.
+
 ## 0.3.0
 
 Added a common `Client` with resource fields `client.responses.create` and `client.responses.parse` for text input. Use `client.messages.create` and `client.messages.parse` for text conversations. Both resources use the configured provider and endpoint through the same adapters. They do not change the HTTP endpoint or provide full native SDK coverage.

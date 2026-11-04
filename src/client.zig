@@ -7,6 +7,7 @@ const openai = @import("providers/openai.zig");
 const anthropic = @import("providers/anthropic.zig");
 const http = @import("transport.zig");
 const request_options = @import("request_options.zig");
+const decisions_mod = @import("decisions.zig");
 pub const QueryParam = request_options.QueryParam;
 
 pub const Provider = enum { openai, anthropic };
@@ -131,6 +132,7 @@ pub const Client = struct {
     _state: *State,
     messages: Messages,
     responses: Responses,
+    decisions: Decisions,
 
     pub fn init(config: Config) !Client {
         return wrap(try State.init(config));
@@ -149,6 +151,7 @@ pub const Client = struct {
             ._state = pointer,
             .messages = .{ .state = pointer },
             .responses = .{ .state = pointer },
+            .decisions = .{ .state = pointer },
         };
     }
 
@@ -361,6 +364,77 @@ const State = struct {
         };
     }
 
+    fn requestDecision(self: *State, input: decisions_mod.CreateParams) !decisions_mod.Response {
+        self.clearLastError();
+        if (self.backend != .openai) return error.UnsupportedDecisionProvider;
+        var temporary = std.heap.ArenaAllocator.init(self.allocator);
+        defer temporary.deinit();
+        const allocator = temporary.allocator();
+        var params = input;
+        params.model = input.model orelse self.model;
+        params.extra_body = try request_options.mergeExtraBody(allocator, self.extra_body, input.extra_body);
+        params.extra_query = try request_options.mergeQuery(allocator, self.extra_query, input.extra_query);
+        if (self.hooks) |hooks| hooks.emit(.request_start, .{});
+        const response = try self.backend.openai.createDecision(self.allocator, params);
+        if (self.hooks) |hooks| hooks.emit(.response_received, .{
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+        });
+        return response;
+    }
+
+    fn createDecision(self: *State, params: decisions_mod.CreateParams) !decisions_mod.Response {
+        const response = try self.requestDecision(params);
+        if (self.hooks) |hooks| hooks.emit(.completion_done, .{
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+        });
+        return response;
+    }
+
+    fn parseDecision(self: *State, comptime T: type, params: decisions_mod.ParseParams(T)) !decisions_mod.Parsed(T) {
+        self.clearLastError();
+        if (self.backend != .openai) return error.UnsupportedDecisionProvider;
+        var temporary = std.heap.ArenaAllocator.init(self.allocator);
+        defer temporary.deinit();
+        const questions = try decisions_mod.buildQuestions(T, temporary.allocator(), params.questions);
+        var response = try self.requestDecision(.{
+            .input = params.input,
+            .questions = questions,
+            .model = params.model,
+            .extra_body = params.extra_body,
+            .extra_headers = params.extra_headers,
+            .extra_query = params.extra_query,
+        });
+        errdefer response.deinit();
+        const parsed = decisions_mod.decode(T, response.value, params.questions) catch |err| {
+            self.backend.openai.last_status = response.status;
+            self.backend.openai.last_error_body = try self.allocator.dupe(u8, response.raw_response);
+            if (self.hooks) |hooks| hooks.emit(.parse_error, .{
+                .schema_name = @typeName(T),
+                .raw_response = response.raw_response,
+                .error_name = @errorName(err),
+                .usage = response.usage,
+            });
+            return err;
+        };
+        if (self.hooks) |hooks| hooks.emit(.completion_done, .{
+            .schema_name = @typeName(T),
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+        });
+        return .{
+            .arena = response.arena,
+            .value = parsed.value,
+            .details = parsed.details,
+            .response = response.value,
+            .status = response.status,
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+            .model = response.model,
+        };
+    }
+
     fn withDefaults(self: *const State, allocator: std.mem.Allocator, input: Request) !Request {
         var request = input;
         request.extra_body = try request_options.mergeExtraBody(allocator, self.extra_body, input.extra_body);
@@ -386,6 +460,20 @@ const State = struct {
         @memcpy(conversation[0..request.messages.len], request.messages);
         if (request.prompt) |prompt| conversation[request.messages.len] = .{ .role = .user, .content = prompt };
         return conversation;
+    }
+};
+
+/// A borrowed resource for native Decisions requests and typed branching.
+/// Its state remains valid across moves of the owning client.
+pub const Decisions = struct {
+    state: *State,
+
+    pub fn create(self: Decisions, params: decisions_mod.CreateParams) !decisions_mod.Response {
+        return self.state.createDecision(params);
+    }
+
+    pub fn parse(self: Decisions, comptime T: type, params: decisions_mod.ParseParams(T)) !decisions_mod.Parsed(T) {
+        return self.state.parseDecision(T, params);
     }
 };
 
@@ -525,4 +613,5 @@ fn optionalDupe(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
 
 test {
     _ = @import("client_tests.zig");
+    _ = @import("client_decision_tests.zig");
 }

@@ -7,6 +7,8 @@
   --zig-orange: #f7a41d;
 }
 body { margin: 0; }
+*, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+@view-transition { navigation: none; }
 a { text-underline-offset: .18em; }
 a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 .site-header { margin: 0; padding: 0; max-inline-size: none; border-block-end: 2px solid var(--zig-orange); }
@@ -17,15 +19,18 @@ a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px soli
 .site-header a:hover { color: var(--accent); }
 .docs-layout { display: grid; grid-template-columns: 12rem minmax(0, 45rem) 12rem; gap: 2rem; max-inline-size: 80rem; margin-inline: auto; padding: 1.75rem 2rem 2rem; }
 aside { align-self: start; position: sticky; inset-block-start: 2rem; margin: 0; padding: 0; border: 0; background: none; }
+.sidebar { max-block-size: calc(100dvh - 4rem); overflow-y: auto; }
 .sidebar, .page-toc { font-size: .875rem; line-height: 1.5; }
 .nav-title { font-size: .8rem; font-weight: 650; color: var(--muted-fg); margin: 0 0 .65rem .6rem; }
 .nav-group + .nav-group { margin-block-start: 1.75rem; }
 .docs-nav ul { list-style: none; margin: 0; padding: 0; }
 .docs-nav a:any-link { display: block; padding: .4rem .6rem; color: var(--fg); text-decoration: none; border: 0; }
+.docs-nav .recipe-nav { margin: .3rem 0 .5rem .6rem; padding-inline-start: .5rem; border-inline-start: 1px solid light-dark(#ddd, #414143); }
+.docs-nav .recipe-nav a:any-link { font-size: .8rem; padding-block: .3rem; }
 .docs-nav a:hover { background: var(--box-bg); }
 .docs-nav a:any-link { font-weight: 400; }
-.docs-nav a[aria-current="page"] { background: light-dark(#fff0d7, #372911); }
-.docs-nav a[aria-current="page"]::after { content: none; }
+.docs-nav a[aria-current] { background: light-dark(#fff0d7, #372911); }
+.docs-nav a[aria-current]::after { content: none; }
 article :is(h1, h2, h3, h4):target::before { content: none; }
 main { min-inline-size: 0; max-inline-size: none; padding: 0; margin: 0; }
 article { margin: 0; padding: 0; }
@@ -72,6 +77,8 @@ footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .7
   .site-header .project-link { font-size: .8rem; }
   .docs-layout { grid-template-columns: minmax(0, 1fr); padding: 1.5rem 1rem; gap: 1.5rem; }
   aside { position: static; }
+  .sidebar { max-block-size: none; overflow: visible; }
+  .docs-nav .recipe-nav { display: none; }
   .nav-title { display: none; }
   .nav-group + .nav-group { margin-block-start: .4rem; }
   .docs-nav ul { display: flex; flex-wrap: wrap; gap: .2rem .5rem; }

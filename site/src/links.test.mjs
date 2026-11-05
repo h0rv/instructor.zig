@@ -12,6 +12,9 @@ test("root and project hosting paths preserve trailing slashes", () => {
 test("existing Markdown guides map to site pages without moving source", () => {
   assert.equal(pagePath("README.md"), "");
   assert.equal(pagePath("docs/decisions.md"), "guides/decisions/");
+  assert.equal(pagePath("docs/cookbook/product.md"), "guides/cookbook/product/");
+  assert.equal(rewriteLink("../client.md", "docs/cookbook/product.md"), "/guides/client/");
+  assert.equal(rewriteLink("../../examples/client.zig", "docs/cookbook/product.md"), "https://github.com/h0rv/instructor.zig/blob/main/examples/client.zig");
   assert.equal(pagePath("examples/client.zig"), null);
   assert.equal(rewriteLink("docs/decisions.md#supported-types", "README.md"), "/guides/decisions/#supported-types");
   assert.equal(rewriteLink("client.md#request-extras", "docs/decisions.md"), "/guides/client/#request-extras");

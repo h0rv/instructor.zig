@@ -1,80 +1,44 @@
 # Cookbook
 
+Recipes for extracting typed data and making model decisions. The snippets omit process startup and credential loading.
+
 ## Text and structured output
 
-These examples generate text or parse model output into Zig types.
+Use these recipes to parse model output into Zig types. See the [client guide](client.md) for ordinary text generation without a schema.
 
-### Extract a product
-
-Convert a product description into a `Product` with a name, price, and stock status. The common client generates the schema and returns an owned result.
-
-```zig
-const Product = struct {
-    name: []const u8,
-    price: f64,
-    in_stock: bool,
-};
-
-var product = try client.responses.parse(Product, .{
-    .input = "A coffee mug costs $12.50 and is in stock.",
-});
-defer product.deinit();
-```
-
-[Full example](../examples/client.zig)
-
-### Extract an invoice
-
-Parse invoice text into an invoice with nested line items. Amounts use integer cents rather than floating-point money values.
-
-[Full example](../examples/invoice_extraction.zig)
-
-### Summarize meeting actions
-
-Extract a summary and action records with an owner, task, priority, and due date.
-
-[Full example](../examples/action_items.zig)
-
-### Classify a request
-
-Parse a refund request, bug report, or feature request into a wrapped tagged union. This uses structured output, not the Decisions API.
-
-[Full example](../examples/classify_union.zig)
-
-### Process reviews
-
-Parse reviews one at a time and reset the session memory after each result. This is a local loop, not a provider Batch API.
-
-[Full example](../examples/batch_extract.zig)
-
-### Inspect an image
-
-Send an image through the lower-level OpenAI provider and return typed scene observations.
-
-[Full example](../examples/multimodal_inspection.zig)
+- [Extract a product](cookbook/product.md). Start with the common `Client` and an owned result.
+- [Extract an invoice](cookbook/invoice.md). Parse nested line items and integer money amounts.
+- [Summarize meeting actions](cookbook/meeting-actions.md). Extract a summary and tasks with owners and due dates.
+- [Classify a request](cookbook/classification.md). Switch on a tagged union with different fields for each case.
+- [Process reviews](cookbook/reviews.md). Validate ratings and release session memory between requests.
+- [Inspect an image](cookbook/image-inspection.md). Use the lower-level provider for typed visual observations.
 
 ## Decisions
 
-These examples ask fixed questions and return typed choices with probabilities.
+Use these recipes for fixed questions with typed choices and probabilities, rather than extracting strings or nested objects. See the [Decisions guide](decisions.md) for provider configuration.
 
-### Branch on relevance
+- [Branch on relevance](cookbook/boolean-branching.md). Compare a predicate probability with a threshold.
+- [Route a ticket](cookbook/ticket-routing.md). Ask reusable team and urgency questions together.
 
-Ask whether a passage answers a query. The helper compares its probability with a threshold and frees the response.
+## Shared setup
+
+Product extraction and the Decisions recipes take a configured `*instructor.Client`. Configure it as described in the [client guide](client.md). Decisions requires OpenAI or a TypeSafe-compatible service.
+
+The invoice, meeting, classification, and review functions take a `*instructor.Session(instructor.OpenAI)`. Create the lower-level provider and session once, with application values for `allocator`, `io`, and `api_key`:
 
 ```zig
-if (try client.decisions.condition(.{
-    .input = passage,
-    .instructions = "Does this passage answer the search query?",
-    .threshold = 0.8,
-})) {
-    includePassage();
-}
+const instructor = @import("instructor");
+
+var provider = instructor.OpenAI.init(.{
+    .allocator = allocator,
+    .io = io,
+    .api_key = api_key,
+    .base_url = "https://openrouter.ai/api/v1",
+    .endpoint = .chat_completions,
+});
+defer provider.deinit();
+var session = instructor.session(allocator, &provider);
+defer session.deinit();
 ```
 
-[Full example](../examples/smart_if.zig)
-
-### Route a ticket
-
-Define reusable questions that return a team enum and an urgency boolean. The same questions work with the configured OpenAI or TypeSafe-compatible provider.
-
-[Full example](../examples/decisions.zig)
+Pass `&session` to those functions. Image inspection uses a separate OpenAI Responses provider, as noted in that recipe. Keep providers alive until their sessions are deinitialized. Session values remain valid until `session.reset()` or `session.deinit()`; they have no individual `deinit` method.

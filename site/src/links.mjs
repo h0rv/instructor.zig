@@ -6,7 +6,7 @@ export const repositoryURL = "https://github.com/h0rv/instructor.zig";
 
 export function pagePath(source) {
   if (source === "README.md") return "";
-  if (/^docs\/[^/]+\.md$/.test(source)) return `guides/${posix.basename(source, ".md")}/`;
+  if (/^docs\/.+\.md$/.test(source)) return `guides/${source.slice(5, -3)}/`;
   return null;
 }
 

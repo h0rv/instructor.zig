@@ -18,6 +18,12 @@ function walk(directory) {
 for (const file of walk(root).filter((path) => path.endsWith(".html"))) {
   const page = relative(root, file).replaceAll("\\", "/");
   const html = readFileSync(file, "utf8");
+  if (!page.startsWith("api/")) {
+    const blocks = [...html.matchAll(/<pre\b/g)].length;
+    const buttons = [...html.matchAll(/class="copy-code"/g)].length;
+    assert.equal(buttons, blocks, `Code controls must be present in the initial HTML: ${page}`);
+    assert.ok(html.includes('name="color-scheme"'), `Missing initial color scheme: ${page}`);
+  }
   for (const match of html.matchAll(/(?:href|src)="([^"]+)"/g)) {
     const url = new URL(match[1].replaceAll("&amp;", "&"), origin + base + page);
     if (url.origin !== origin) continue;

@@ -27,6 +27,18 @@ const groups = [
     ["Architecture", "guides/architecture/"],
   ] },
 ];
+const recipes = [
+  ["Product extraction", "product"],
+  ["Invoice extraction", "invoice"],
+  ["Meeting actions", "meeting-actions"],
+  ["Classification", "classification"],
+  ["Review processing", "reviews"],
+  ["Image inspection", "image-inspection"],
+  ["Boolean branching", "boolean-branching"],
+  ["Ticket routing", "ticket-routing"],
+];
+const cookbookPath = withBase("guides/cookbook/", base);
+const inCookbook = Astro.url.pathname.startsWith(cookbookPath);
 const sections = buildToc(headings);
 ---
 <!doctype html>
@@ -34,6 +46,8 @@ const sections = buildToc(headings);
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <style is:inline>html{color-scheme:light dark;background:light-dark(#f8fafb,#121210);color:light-dark(#121210,#f8fafb)}body{margin:0}</style>
     <meta name="description" content="Structured extraction and typed model decisions in Zig." />
     <title>{title === "instructor.zig" ? title : `${title} · instructor.zig`}</title>
     <link rel="stylesheet" href={withBase("missing.css", base)} />
@@ -60,7 +74,10 @@ const sections = buildToc(headings);
           {groups.map((group) => <div class="nav-group">
             <p class="nav-title">{group.title}</p>
             <ul>{group.links.map(([label, path]) => <li>
-              <a href={withBase(path, base)} aria-current={Astro.url.pathname === withBase(path, base) ? "page" : undefined}>{label}</a>
+              <a href={withBase(path, base)} aria-current={Astro.url.pathname === withBase(path, base) ? "page" : label === "Cookbook" && inCookbook ? "location" : undefined}>{label}</a>
+              {label === "Cookbook" && inCookbook && <ul class="recipe-nav">
+                {recipes.map(([name, slug]) => <li><a href={withBase(`guides/cookbook/${slug}/`, base)} aria-current={Astro.url.pathname === withBase(`guides/cookbook/${slug}/`, base) ? "page" : undefined}>{name}</a></li>)}
+              </ul>}
             </li>)}</ul>
           </div>)}
         </nav>

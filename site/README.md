@@ -1,6 +1,6 @@
 # Documentation site
 
-The site uses the existing repository Markdown and Zig's generated API documentation. It is static HTML with local missing.css. A small script adds code-copy buttons. Navigation works without JavaScript.
+The site uses the existing repository Markdown and Zig's generated API documentation. It is static HTML with local missing.css. Code-copy buttons are rendered in the initial HTML. A small script handles clipboard clicks without moving the content. Navigation works without JavaScript.
 
 Use Node 24 or later and Zig 0.17.0.
 

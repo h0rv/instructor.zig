@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { relative } from "node:path";
 import { rewriteLink, repositoryRoot } from "./src/links.mjs";
 import { zigLight, zigDark } from "./src/zig-themes.mjs";
+import { codeBlocks } from "./src/code-blocks.mjs";
 
 export default defineConfig({
   site: "https://horv.co",
@@ -15,7 +16,7 @@ export default defineConfig({
     shikiConfig: { themes: { light: zigLight, dark: zigDark } },
     processor: satteri({
       features: { smartPunctuation: false },
-      hastPlugins: [(file) => defineHastPlugin({
+      hastPlugins: [codeBlocks, (file) => defineHastPlugin({
         name: "repository-links",
         element: {
           filter: ["a"],

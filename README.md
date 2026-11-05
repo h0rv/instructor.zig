@@ -6,7 +6,7 @@ Define a struct and call `parse`. Instructor generates its JSON Schema and valid
 
 Use the same `client.responses.parse` or `client.messages.parse` calls with OpenAI Responses, OpenAI-compatible Chat Completions, or Anthropic Messages. Choose the provider and endpoint in client configuration.
 
-Use `client.decisions` with OpenAI's Decisions API for boolean conditions and typed routing.
+Use `client.decisions` with OpenAI or TypeSafe-compatible services for boolean conditions and typed routing.
 
 ## Install
 
@@ -95,7 +95,7 @@ if (try client.decisions.condition(.{
 
 For several answers, define `Questions(T)` once and call `questions.parse(...)`. It returns the value and handles response cleanup. Use `parseDetailed(...)` when you need probabilities.
 
-See [the Decisions guide](docs/decisions.md) and [ticket routing example](examples/decisions.zig). OpenAI is the supported backend. Jev uses TypeSafe's separate API and needs its own adapter.
+For Jev through TypeSafe, OpenRouter, or Vercel, use the shared `.typesafe` adapter. The `condition` and `Questions(T)` calls stay the same. See [provider configuration](docs/decisions.md#provider-configuration) and the [ticket routing example](examples/decisions.zig).
 
 ## What you can build
 

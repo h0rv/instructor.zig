@@ -5,6 +5,7 @@ const Options = @import("../core/options.zig").Options;
 const http = @import("../transport.zig");
 const request_options = @import("../request_options.zig");
 const decisions = @import("../decisions.zig");
+const system_one = @import("system_one.zig");
 pub const QueryParam = request_options.QueryParam;
 
 pub const api = openai;
@@ -16,12 +17,15 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     sdk: openai.Client,
     endpoint: Endpoint = .responses,
+    decision_format: DecisionFormat = .openai,
     http_referer: ?[]const u8 = null,
     app_name: ?[]const u8 = null,
     transport: ?http.Transport = null,
     max_response_bytes: usize = 8 * 1024 * 1024,
     last_status: ?std.http.Status = null,
     last_error_body: ?[]u8 = null,
+
+    pub const DecisionFormat = enum { openai, typesafe };
 
     pub const Endpoint = enum {
         responses,
@@ -45,6 +49,7 @@ pub const Client = struct {
         base_url: []const u8 = "https://api.openai.com/v1",
         /// `.chat_completions` works with OpenRouter and many OpenAI-compatible APIs.
         endpoint: Endpoint = .responses,
+        decision_format: DecisionFormat = .openai,
         /// Optional OpenRouter ranking header.
         http_referer: ?[]const u8 = null,
         /// Optional OpenRouter ranking header.
@@ -100,6 +105,7 @@ pub const Client = struct {
             .allocator = config.allocator,
             .sdk = sdk,
             .endpoint = config.endpoint,
+            .decision_format = config.decision_format,
             .http_referer = config.http_referer,
             .app_name = config.app_name,
             .transport = config.transport,
@@ -165,21 +171,25 @@ pub const Client = struct {
         return self.decodeCompletion(allocator, raw, true);
     }
 
-    /// Native Decisions request. Questions and input are borrowed only during this call.
+    /// Decisions request. Questions and input are borrowed only during this call.
     pub fn createDecision(self: *Client, allocator: std.mem.Allocator, request: decisions.CreateParams) !decisions.Response {
         self.clearLastError();
         const model = request.model orelse return error.MissingModel;
         if (model.len == 0) return error.MissingModel;
         if (request.questions.len == 0 or request.questions.len > 400) return error.InvalidDecisionQuestions;
 
-        const body: openai.DecisionRequest = .{
-            .model = model,
-            .input = .{ .string = request.input },
-            .questions = request.questions,
+        var temporary = std.heap.ArenaAllocator.init(allocator);
+        defer temporary.deinit();
+        var raw = switch (self.decision_format) {
+            .openai => try dispatch(self, allocator, "/decisions", openai.DecisionRequest{
+                .model = model,
+                .input = .{ .string = request.input },
+                .questions = request.questions,
+            }, request, false),
+            .typesafe => try dispatch(self, allocator, "/systemone", try system_one.encode(temporary.allocator(), request), request, false),
         };
-        var raw = try dispatch(self, allocator, "/decisions", body, request, false);
         defer raw.deinit();
-        return self.decodeDecision(allocator, raw) catch |err| {
+        return self.decodeDecision(allocator, raw, request.questions) catch |err| {
             if (err == error.OutOfMemory) return err;
             self.last_status = raw.status;
             self.last_error_body = try self.allocator.dupe(u8, raw.body);
@@ -187,8 +197,7 @@ pub const Client = struct {
         };
     }
 
-    fn decodeDecision(self: *Client, allocator: std.mem.Allocator, raw: openai.RawResponse) !decisions.Response {
-        _ = self;
+    fn decodeDecision(self: *Client, allocator: std.mem.Allocator, raw: openai.RawResponse, questions: []const openai.QuestionParam) !decisions.Response {
         const arena = try allocator.create(std.heap.ArenaAllocator);
         errdefer allocator.destroy(arena);
         arena.* = .init(allocator);
@@ -196,6 +205,18 @@ pub const Client = struct {
         const owned = arena.allocator();
         if (raw.status.class() != .success or try hasProviderError(owned, raw.body)) return Error.ProviderHttpError;
         const raw_response = try owned.dupe(u8, raw.body);
+        if (self.decision_format == .typesafe) {
+            const decoded = try system_one.decode(owned, raw_response, questions);
+            return .{
+                .arena = arena,
+                .value = decoded.value,
+                .status = raw.status,
+                .raw_response = raw_response,
+                .usage = decoded.usage,
+                .model = decoded.value.model,
+                .rounding = decoded.rounding,
+            };
+        }
         const value = try std.json.parseFromSliceLeaky(openai.DecisionResponse, owned, raw_response, .{
             .allocate = .alloc_always,
             .ignore_unknown_fields = true,
@@ -342,7 +363,7 @@ fn dispatch(client: *Client, allocator: std.mem.Allocator, path: []const u8, bod
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const api_kind: request_options.Api = if (std.mem.eql(u8, path, "/decisions")) .decisions else if (client.endpoint == .responses) .responses else .chat_completions;
+    const api_kind: request_options.Api = if (std.mem.eql(u8, path, "/systemone")) .system_one else if (std.mem.eql(u8, path, "/decisions")) .decisions else if (client.endpoint == .responses) .responses else .chat_completions;
     const merged = try request_options.mergePayload(scratch, body, request.extra_body, api_kind, structured);
     const payload = try std.json.Stringify.valueAlloc(scratch, merged, .{});
     var defaults: std.ArrayList(std.http.Header) = .empty;

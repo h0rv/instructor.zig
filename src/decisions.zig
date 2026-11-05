@@ -188,6 +188,8 @@ pub fn ParseParams(comptime T: type) type {
 pub const Response = struct {
     arena: *std.heap.ArenaAllocator,
     value: api.DecisionResponse,
+    /// Decimal places reported by System One, or Jev's documented precision.
+    rounding: ?u8 = null,
     status: std.http.Status = .ok,
     raw_response: []const u8,
     usage: Usage,
@@ -206,6 +208,7 @@ pub fn Parsed(comptime T: type) type {
         value: T,
         details: Details(T),
         response: api.DecisionResponse,
+        rounding: ?u8 = null,
         status: std.http.Status = .ok,
         raw_response: []const u8,
         usage: Usage,
@@ -316,6 +319,14 @@ const probability_tolerance = 1e-3;
 /// All answers must match in order. No partial result or default is returned.
 /// This performs no allocations and does not parse generated text.
 pub fn decode(comptime T: type, response: api.DecisionResponse, questions: QuestionFields(T)) !struct { value: T, details: Details(T) } {
+    const result = try decodeRounded(T, response, questions, null);
+    return .{ .value = result.value, .details = result.details };
+}
+
+/// Preserve rounded provider values and validate that their rounding intervals
+/// admit a normalized distribution. Native OpenAI keeps its strict tolerance.
+pub fn decodeRounded(comptime T: type, response: api.DecisionResponse, questions: QuestionFields(T), rounding: ?u8) !struct { value: T, details: Details(T) } {
+    if (rounding) |places| if (places > 15) return error.InvalidDecisionResponse;
     try validateQuestions(T, questions);
     if (response.answers.len != count(T)) return error.InvalidDecisionResponse;
     if (@typeInfo(T) == .@"struct") {
@@ -323,14 +334,14 @@ pub fn decode(comptime T: type, response: api.DecisionResponse, questions: Quest
         var details: Details(T) = undefined;
         inline for (@typeInfo(T).@"struct".field_names, @typeInfo(T).@"struct".field_types, 0..) |name, F, i| {
             try validateName(response.answers[i], name);
-            const result = try decodeScalar(F, response.answers[i], @field(questions, name));
+            const result = try decodeScalar(F, response.answers[i], @field(questions, name), rounding);
             @field(value, name) = result.value;
             @field(details, name) = result.details;
         }
         return .{ .value = value, .details = details };
     } else {
         try validateName(response.answers[0], "decision");
-        const result = try decodeScalar(T, response.answers[0], questions);
+        const result = try decodeScalar(T, response.answers[0], questions, rounding);
         return .{ .value = result.value, .details = result.details };
     }
 }
@@ -366,7 +377,7 @@ fn choiceValue(comptime E: type, value: api.ChoiceValueResource) !E {
     };
 }
 
-fn decodeScalar(comptime T: type, answer: api.AnswerResource, question: Question(T)) !struct { value: T, details: ScalarDetails(T) } {
+fn decodeScalar(comptime T: type, answer: api.AnswerResource, question: Question(T), rounding: ?u8) !struct { value: T, details: ScalarDetails(T) } {
     switch (@typeInfo(T)) {
         .bool => {
             const p = try predicateProbability(answer);
@@ -383,6 +394,9 @@ fn decodeScalar(comptime T: type, answer: api.AnswerResource, question: Question
             var probabilities = std.EnumArray(T, f64).initUndefined();
             var seen = std.EnumArray(T, bool).initFill(false);
             var sum: f64 = 0;
+            var lower: f64 = 0;
+            var upper: f64 = 0;
+            const epsilon = roundingError(rounding);
             var maximum: f64 = 0;
             for (a.probabilities) |entry| {
                 const key = try choiceValue(T, entry.value);
@@ -390,9 +404,16 @@ fn decodeScalar(comptime T: type, answer: api.AnswerResource, question: Question
                 seen.set(key, true);
                 probabilities.set(key, entry.probability);
                 sum += entry.probability;
+                lower += @max(0, entry.probability - epsilon);
+                upper += @min(1, entry.probability + epsilon);
                 maximum = @max(maximum, entry.probability);
             }
-            if (@abs(sum - 1) > probability_tolerance or probabilities.get(selected) != maximum) return error.InvalidDecisionResponse;
+            const slack = 2 * std.math.floatEps(f64) * @as(f64, @floatFromInt(a.probabilities.len));
+            const valid_sum = if (rounding != null)
+                lower <= 1 + slack and upper >= 1 - slack
+            else
+                @abs(sum - 1) <= probability_tolerance;
+            if (!valid_sum or probabilities.get(selected) != maximum) return error.InvalidDecisionResponse;
             return .{ .value = selected, .details = .{ .probabilities = probabilities, .confidence = a.confidence } };
         },
         .float => switch (question) {
@@ -420,9 +441,11 @@ fn decodeScalar(comptime T: type, answer: api.AnswerResource, question: Question
                     sum += entry.probability;
                     weighted += @as(f64, @floatFromInt(i)) * entry.probability;
                 }
-                // Allow small differences from the provider's wire rounding.
-                if (@abs(sum - 1) > probability_tolerance or @abs(a.score - weighted) > probability_tolerance)
+                if (rounding) |_| {
+                    try validateRoundedScore(a, roundingError(rounding));
+                } else if (@abs(sum - 1) > probability_tolerance or @abs(a.score - weighted) > probability_tolerance) {
                     return error.InvalidDecisionResponse;
+                }
                 const value = if (score_question.scale) |scale| blk: {
                     const t = a.score / last;
                     // Convex interpolation avoids overflowing maximum - minimum.
@@ -434,6 +457,47 @@ fn decodeScalar(comptime T: type, answer: api.AnswerResource, question: Question
         },
         else => unreachable,
     }
+}
+
+fn roundingError(rounding: ?u8) f64 {
+    const places = rounding orelse return 0;
+    return 0.5 * std.math.pow(f64, 10, -@as(f64, @floatFromInt(places)));
+}
+
+fn validateRoundedScore(answer: api.AnswerResourceScore, epsilon: f64) !void {
+    var lower: [10]f64 = @splat(0);
+    var capacity: [10]f64 = @splat(0);
+    var sum_lower: f64 = 0;
+    var sum_upper: f64 = 0;
+    var base: f64 = 0;
+    for (answer.probabilities) |entry| {
+        const i: usize = @intCast(entry.value);
+        lower[i] = @max(0, entry.probability - epsilon);
+        const upper = @min(1, entry.probability + epsilon);
+        capacity[i] = upper - lower[i];
+        sum_lower += lower[i];
+        sum_upper += upper;
+        base += @as(f64, @floatFromInt(i)) * lower[i];
+    }
+    const n: f64 = @floatFromInt(answer.probabilities.len);
+    const sum_slack = 2 * std.math.floatEps(f64) * n;
+    const score_slack = 4 * std.math.floatEps(f64) * n * n;
+    if (sum_lower > 1 + sum_slack or sum_upper < 1 - sum_slack) return error.InvalidDecisionResponse;
+    var minimum = base;
+    var maximum = base;
+    var remaining_low = @max(0, 1 - sum_lower);
+    var remaining_high = remaining_low;
+    for (0..answer.probabilities.len) |i| {
+        const lo = @min(remaining_low, capacity[i]);
+        minimum += @as(f64, @floatFromInt(i)) * lo;
+        remaining_low -= lo;
+        const j = answer.probabilities.len - 1 - i;
+        const hi = @min(remaining_high, capacity[j]);
+        maximum += @as(f64, @floatFromInt(j)) * hi;
+        remaining_high -= hi;
+    }
+    if (answer.score < minimum - epsilon - score_slack or answer.score > maximum + epsilon + score_slack)
+        return error.InvalidDecisionResponse;
 }
 
 fn narrow(comptime T: type, value: f64, minimum: f64, maximum: f64) !T {
@@ -1019,4 +1083,82 @@ test "owner wrappers preserve public params and stable arena lifetime" {
     };
     try testing.expect(parsed.value);
     parsed.deinit();
+}
+
+test "rounded distributions stay unchanged and native tolerance stays strict" {
+    var entries = [_]api.ChoiceProbabilityResource{
+        .{ .value = .{ .string = "not a match" }, .probability = 0.33 },
+        .{ .value = .{ .string = "send.review" }, .probability = 0.33 },
+        .{ .value = .{ .string = "日本語" }, .probability = 0.33 },
+    };
+    var answer = testChoice();
+    answer.choice.probabilities = &entries;
+    const question: Question(TestChoice) = .{ .instructions = "Choose" };
+    try testing.expectError(error.InvalidDecisionResponse, decode(TestChoice, testResponse(&.{answer}), question));
+    const result = try decodeRounded(TestChoice, testResponse(&.{answer}), question, 2);
+    try testing.expectEqual(TestChoice.@"send.review", result.value);
+    try testing.expectEqual(@as(f64, 0.33), result.details.probabilities.get(.@"send.review"));
+    entries[0].probability = 0.9;
+    try testing.expectError(error.InvalidDecisionResponse, decodeRounded(TestChoice, testResponse(&.{answer}), question, 2));
+    try testing.expectError(error.InvalidDecisionResponse, decodeRounded(TestChoice, testResponse(&.{answer}), question, 16));
+}
+
+test "high precision rounding does not accept impossible distributions or scores" {
+    const E = enum { a, b };
+    const choice: api.AnswerResource = .{ .choice = .{
+        .name = "decision",
+        .type = "choice",
+        .choice = .{ .string = "a" },
+        .confidence = 0,
+        .probabilities = &.{
+            .{ .value = .{ .string = "a" }, .probability = 0.5 },
+            .{ .value = .{ .string = "b" }, .probability = 0.4999999999995 },
+        },
+    } };
+    try testing.expectError(error.InvalidDecisionResponse, decodeRounded(E, testResponse(&.{choice}), .{ .instructions = "Choose" }, 15));
+    const score: api.AnswerResource = .{ .score = .{
+        .name = "decision",
+        .type = "score",
+        .score = 5e-13,
+        .confidence = 0,
+        .probabilities = &.{
+            .{ .value = 0, .label = "low", .probability = 1 },
+            .{ .value = 1, .label = "high", .probability = 0 },
+        },
+    } };
+    try testing.expectError(error.InvalidDecisionResponse, decodeRounded(f64, testResponse(&.{score}), .{ .score = .{
+        .instructions = "Score",
+        .levels = &.{ .{ .label = "low" }, .{ .label = "high" } },
+    } }, 15));
+}
+
+test "rounded score checks admit real distributions over a bounded exhaustive grid" {
+    // Every normalized three-level distribution in steps of 0.005 must remain
+    // valid after independently rounding its probabilities and score to 2 places.
+    var entries = [_]api.ScoreProbabilityResource{
+        .{ .value = 0, .label = "low", .probability = 0 },
+        .{ .value = 1, .label = "medium", .probability = 0 },
+        .{ .value = 2, .label = "high", .probability = 0 },
+    };
+    var answer = testScore();
+    answer.score.probabilities = &entries;
+    for (0..201) |a| {
+        for (0..201 - a) |b| {
+            const c = 200 - a - b;
+            const p0 = @as(f64, @floatFromInt(a)) / 200;
+            const p1 = @as(f64, @floatFromInt(b)) / 200;
+            const p2 = @as(f64, @floatFromInt(c)) / 200;
+            entries[0].probability = @round(p0 * 100) / 100;
+            entries[1].probability = @round(p1 * 100) / 100;
+            entries[2].probability = @round(p2 * 100) / 100;
+            answer.score.score = @round((p1 + 2 * p2) * 100) / 100;
+            const result = try decodeRounded(f64, testResponse(&.{answer}), test_score_question, 2);
+            try testing.expectEqual(answer.score.score, result.value);
+        }
+    }
+    entries[0].probability = 1;
+    entries[1].probability = 0;
+    entries[2].probability = 0;
+    answer.score.score = 2;
+    try testing.expectError(error.InvalidDecisionResponse, decodeRounded(f64, testResponse(&.{answer}), test_score_question, 2));
 }

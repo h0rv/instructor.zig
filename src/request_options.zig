@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
 pub const QueryParam = struct { name: []const u8, value: []const u8 };
-pub const Api = enum { responses, chat_completions, anthropic, decisions };
+pub const Api = enum { responses, chat_completions, anthropic, decisions, system_one };
 
 // All helpers allocate into a caller-owned arena. Partial results on failure
 // are reclaimed by that arena, including recursively allocated JSON values.
@@ -84,7 +84,8 @@ fn validateExtra(extra: Value, api: Api, structured: bool) !void {
         for ([_][]const u8{ "model", "input", "messages" }) |reserved| {
             if (std.mem.eql(u8, key, reserved)) return error.ReservedBodyField;
         }
-        if (api == .decisions and std.mem.eql(u8, key, "questions")) return error.ReservedBodyField;
+        if ((api == .decisions or api == .system_one) and std.mem.eql(u8, key, "questions")) return error.ReservedBodyField;
+        if (api == .system_one and std.mem.eql(u8, key, "state")) return error.ReservedBodyField;
         if (std.mem.eql(u8, key, "stream")) {
             if (value != .bool or value.bool) return error.UnsupportedStreaming;
         }
@@ -93,7 +94,7 @@ fn validateExtra(extra: Value, api: Api, structured: bool) !void {
             if (std.mem.eql(u8, key, reserved)) return error.ReservedBodyField;
         }
         switch (api) {
-            .decisions => {},
+            .decisions, .system_one => {},
             .chat_completions => {
                 if (std.mem.eql(u8, key, "response_format")) return error.ReservedBodyField;
             },

@@ -1,6 +1,37 @@
 # Decisions
 
-Use OpenAI's Decisions API for questions with a fixed set of answers.
+Use `client.decisions` with OpenAI or TypeSafe-compatible services for questions with a fixed set of answers.
+
+## Provider configuration
+
+Use `.typesafe` for Jev through TypeSafe, OpenRouter, or Vercel. Set the base URL and model for your service.
+
+```zig
+var client = try instructor.Client.init(.{
+    .allocator = allocator,
+    .io = io,
+    .provider = .{
+        .typesafe = .{
+            .api_key = api_key,
+            .base_url = "https://openrouter.ai/api/v1",
+        },
+    },
+    .model = "typesafe/jev-1.13",
+});
+defer client.deinit();
+```
+
+| Service | Base URL | Model |
+| --- | --- | --- |
+| TypeSafe | `https://api.typesafe.ai/v1` | `jev-latest` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `typesafe/jev-1.13` |
+| Vercel | `https://ai-gateway.vercel.sh/typesafe/v1` | `typesafe-ai/jev` |
+
+All three use `POST /systemone` under the base URL. The `.typesafe` defaults are the TypeSafe base URL and `jev-latest` model. With `Client.fromEnv`, `.provider = .typesafe` reads `TYPESAFE_API_KEY`. For gateways, use explicit `Client.init` with your gateway key, as above.
+
+The `client.decisions.condition` and `Questions(T)` calls stay the same. The `.typesafe` provider supports Decisions only. Text `create` and `parse` calls return `error.UnsupportedTextProvider`.
+
+The `.openai` provider still uses OpenAI's native `/decisions` endpoint.
 
 ## A boolean condition
 
@@ -68,7 +99,9 @@ const billing = decision.details.team.probabilities.get(.billing);
 
 Use these probabilities to handle uncertain answers separately. A model estimate is not a guarantee of correctness. Provider confidence is a separate value, not the probability that an answer is correct. Low confidence does not trigger a retry.
 
-A detailed result also contains the native `response`, exact `raw_response`, HTTP `status`, `usage`, and returned `model`. Its data can outlive the client if the backing allocator stays alive.
+A detailed result includes `response` in a common OpenAI-shaped representation, not TypeSafe's native format. The provider's exact original response is in `raw_response`. The result also includes HTTP `status`, `usage`, and the returned `model`. Its data can outlive the client if the backing allocator stays alive.
+
+Provider distributions are kept as reported, not normalized. Validation accounts for supplied rounding or Jev's documented two decimal places. Missing choice or score distributions return `error.DecisionDetailsUnavailable`. Unreported cache and reasoning counts are zero in the common response.
 
 ## Supported types
 
@@ -101,7 +134,7 @@ Enums support 2 to 255 cases. Scores support 2 to 10 levels. Structs support 1 t
 
 `questions.parse` and `parseDetailed` accept a model override and [request extras](client.md#request-extras). Input and request options are borrowed until the call returns.
 
-For inline questions, `client.decisions.parse(T, params)` returns an owned detailed result. Use `client.decisions.create(params)` for native SDK questions and answers.
+For inline questions, `client.decisions.parse(T, params)` returns an owned detailed result. Use `client.decisions.create(params)` for questions and answers in the common OpenAI-shaped representation. On `.typesafe`, it accepts named predicates, string choices, and scores with text instructions.
 
 Deinitialize the client once. Deinitialize detailed results once. Keep the client alive while using its question sets. Do not run calls concurrently on one client. Malformed answers and refusals return errors.
 
@@ -115,7 +148,5 @@ zig build run-decisions
 ```
 
 See [the boolean example](../examples/smart_if.zig) and [ticket routing](../examples/decisions.zig).
-
-This resource calls OpenAI's `/v1/decisions` endpoint with text input. Jev uses a different request format, so changing the base URL alone will not work.
 
 See [OpenAI's API guide](https://developers.openai.com/api/docs/guides/decisions) and [TypeSafe's Jev introduction](https://typesafe.ai/blog/introducing-system-one-models-and-jev).

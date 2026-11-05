@@ -47,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     const text = "Alex Smith, alex@example.com, called from +1-415-555-0134. Token sk-live-abc123 should not be logged.";
 
     const plan = session.create(RedactionPlan, instructor.OpenAI.Request{
-        .model = "openai/gpt-oss-20b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{ .role = .user, .content = "Redact PII and secrets from this log line:\n" ++ text }},
     }, .{}) catch |err| {
         instructor.printError(err, &client);

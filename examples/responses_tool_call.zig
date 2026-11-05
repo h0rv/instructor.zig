@@ -37,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     ;
 
     const incident = session.create(Incident, instructor.OpenAI.Request{
-        .model = "gpt-5.4-nano",
+        .model = "gpt-6-luna",
         .messages = &.{.{ .role = .user, .content = "Use the record_incident tool for this update:\n\n" ++ update }},
         .max_output_tokens = 512,
     }, .{ .mode = .responses_tool_call_required }) catch |err| {

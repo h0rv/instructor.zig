@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     ;
 
     const result = session.create(GroundedAnswer, instructor.OpenAI.Request{
-        .model = "openai/gpt-oss-20b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{
             .role = .user,
             .content = "Using only this source, answer: what is Alex's April 2026 priority? Include exact supporting quotes.\n\n" ++ source,

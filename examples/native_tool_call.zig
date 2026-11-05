@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     const person = session.create(Person, instructor.OpenAI.Request{
-        .model = "nvidia/nemotron-3-nano-30b-a3b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{ .role = .user, .content = "Alex is 24. Use the tool." }},
     }, .{ .mode = .tool_call }) catch |err| {
         instructor.printError(err, &client);

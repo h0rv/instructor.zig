@@ -7,6 +7,10 @@ Target: small core, provider adapters at edges.
 ```text
 src/
   root.zig                 public package exports
+  client.zig               common client and stable resource handles
+  decisions.zig            typed questions and decision validation
+  request_options.zig      body, header, and query merging
+  transport.zig            shared HTTP transport
 
   core/
     mod.zig                core re-exports + tests
@@ -19,6 +23,8 @@ src/
   providers/
     mod.zig                provider re-exports
     openai.zig             OpenAI-compatible provider adapter backed by openai.zig SDK
+    anthropic.zig          Anthropic Messages adapter
+    system_one.zig         TypeSafe-compatible Decisions translation
     testing.zig            fake provider for core tests/examples
 ```
 
@@ -60,7 +66,7 @@ appendRetry(...)
 Provider decides:
 
 - HTTP endpoint
-- auth headers through openai.zig
+- authentication headers and request-header merging
 - OpenAI-compatible URL override
 - request JSON shape
 - output text extraction

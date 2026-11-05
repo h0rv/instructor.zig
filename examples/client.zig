@@ -10,7 +10,7 @@ const Product = struct {
 pub fn main(init: std.process.Init) !void {
     var ai = try instructor.Client.fromEnv(init, .{
         .provider = .anthropic,
-        .model = "claude-haiku-4-5",
+        .model = "claude-haiku-5-5",
     });
     defer ai.deinit();
 

@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     const plan = session.create(SearchPlan, instructor.OpenAI.Request{
-        .model = "openai/gpt-oss-20b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{
             .role = .user,
             .content = "Create exactly four search actions: image search for a cat picture, video search for a dog video, web search for cat taxonomy, web search for dog taxonomy.",

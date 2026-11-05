@@ -1,0 +1,15 @@
+---
+interface Entry {
+  text: string;
+  slug: string;
+  children: Entry[];
+}
+interface Props { items: Entry[] }
+const { items } = Astro.props;
+---
+<ul>
+  {items.map((item) => <li>
+    <a href={`#${item.slug}`}>{item.text}</a>
+    {item.children.length > 0 && <Astro.self items={item.children} />}
+  </li>)}
+</ul>

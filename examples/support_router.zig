@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
     ;
 
     const route = session.create(TicketRoute, instructor.OpenAI.Request{
-        .model = "openai/gpt-oss-20b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{ .role = .user, .content = "Route this support ticket:\n\n" ++ ticket }},
     }, .{}) catch |err| {
         instructor.printError(err, &client);

@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     ;
 
     const invoice = session.create(Invoice, instructor.OpenAI.Request{
-        .model = "openai/gpt-oss-20b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{ .role = .user, .content = "Extract this invoice. Return cents as integers.\n\n" ++ raw_invoice }},
     }, .{}) catch |err| {
         instructor.printError(err, &client);

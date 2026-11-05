@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
     }};
 
     const inspection = session.create(SceneInspection, instructor.OpenAI.Request{
-        .model = "gpt-5.4-nano",
+        .model = "gpt-6-luna",
         .messages = &.{.{
             .role = .user,
             .content = "Inspect this image. Return only structured observations.",

@@ -1,6 +1,8 @@
-# Common LLM client
+# Text and structured output
 
 `Client` provides buffered text responses and typed parsing through the existing provider adapters. Choose the provider and endpoint when you configure the client. Model names do not select credentials or routing.
+
+These APIs generate text or parse output into Zig types. The [Decisions API](decisions.md) instead answers fixed questions with probabilities and typed choices.
 
 Use `client.responses` for text input or `client.messages` for conversations. These are resource fields, not methods. Both use the same internal adapters and configured HTTP endpoint. `client.responses` on an Anthropic client still uses Anthropic Messages. `client.messages` on an OpenAI Responses client still uses OpenAI Responses.
 

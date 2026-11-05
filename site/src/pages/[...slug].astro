@@ -1,0 +1,25 @@
+---
+import type { MarkdownInstance } from "astro";
+import Layout from "../Layout.astro";
+import { pagePath } from "../links.mjs";
+
+export async function getStaticPaths() {
+  const files = import.meta.glob<MarkdownInstance<Record<string, unknown>>>(
+    ["../../../README.md", "../../../docs/*.md"],
+  );
+  return Promise.all(Object.entries(files).map(async ([path, load]) => {
+    const page = await load();
+    const source = path.replace("../../../", "");
+    const route = pagePath(source)!;
+    const headings = await page.getHeadings();
+    return {
+      params: { slug: route.replace(/\/$/, "") || undefined },
+      props: { Content: page.Content, title: headings[0]?.text || "instructor.zig", headings, source },
+    };
+  }));
+}
+const { Content, title, headings, source } = Astro.props;
+---
+<Layout title={title} headings={headings} source={source}>
+  <Content />
+</Layout>

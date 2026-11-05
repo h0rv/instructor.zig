@@ -50,7 +50,7 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     const decision = session.create(Decision, instructor.OpenAI.Request{
-        .model = "openai/gpt-oss-20b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{ .role = .user, .content = "Order A-991 arrived broken. Please refund it." }},
     }, .{}) catch |err| {
         instructor.printError(err, &client);

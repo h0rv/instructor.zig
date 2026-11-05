@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
 
     for (0..5) |_| {
         const action = session.create(Action, instructor.OpenAI.Request{
-            .model = "nvidia/nemotron-3-nano-30b-a3b:free",
+            .model = "anthropic/claude-haiku-5.5",
             .messages = messages[0..message_count],
         }, .{}) catch |err| {
             instructor.printError(err, &client);

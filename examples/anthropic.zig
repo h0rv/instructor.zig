@@ -22,7 +22,7 @@ pub fn main(init: std.process.Init) !void {
     var session = instructor.session(init.gpa, &client);
     defer session.deinit();
     const person = session.create(Person, instructor.Anthropic.Request{
-        .model = instructor.Anthropic.default_model,
+        .model = "claude-haiku-5-5",
         .messages = &.{
             .{ .role = .system, .content = "Extract the person from the user's text." },
             .{ .role = .user, .content = "Alex is 24." },

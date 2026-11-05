@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
     defer session.deinit();
 
     const query = session.create(SearchQuery, instructor.OpenAI.Request{
-        .model = "openai/gpt-oss-20b:free",
+        .model = "anthropic/claude-haiku-5.5",
         .messages = &.{.{ .role = .user, .content = "Find mature Zig JSON/schema libraries with more than 100 stars, not abandoned, sort by stars." }},
     }, .{}) catch |err| {
         instructor.printError(err, &client);

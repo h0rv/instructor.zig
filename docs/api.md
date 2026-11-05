@@ -1,6 +1,6 @@
-# Client, session, and provider API
+# Sessions and providers
 
-Target Zig version: `0.17.0` stable APIs.
+The common client is summarized below. The remaining sections describe the lower-level provider and session APIs.
 
 ## Common client
 
@@ -65,7 +65,7 @@ Both resources also offer `parseWith`, `parseInto`, and `parseIntoWith`. Parsing
 
 The following sections cover `OpenAI`, `Anthropic`, and `Session`. Request extras work across all three HTTP adapters for ordinary and typed requests, including provider SDK paths without an injected transport.
 
-Status: v0 design. Parsed values are validated by default with `jsonschema.validateValue` for supported metadata.
+Parsed values are validated by default with `jsonschema.validateValue` for supported metadata.
 
 ## Core design
 
@@ -89,7 +89,7 @@ This matches Zig style and `std.Io`: caller controls I/O, allocation, and lifeti
 - Free all result memory through `Session.deinit()`.
 - Validate parsed values against supported `jsonschema.zig` metadata by default.
 
-## Non-goals for v0
+## Limits
 
 - Full JSON Schema spec validation.
 - `T.validate()` hooks.
@@ -113,7 +113,7 @@ var session = instructor.session(gpa, &client);
 defer session.deinit();
 
 const request: instructor.OpenAI.Request = .{
-    .model = instructor.OpenAI.default_model,
+    .model = "gpt-6-luna",
     .messages = &.{
         .{
             .role = .user,
@@ -556,7 +556,7 @@ pub const Completion = struct {
 
 `text` and `raw_response` are owned by caller after return and allocated by allocator passed to `completeStructured`.
 
-Core first parses `text` into a temporary per-attempt arena to avoid failed-attempt allocations leaking into the session arena. On success, core parses again into the session/result arena with `.alloc_always`, then frees completion buffers.
+Core first parses `text` into a temporary per-attempt arena to avoid retaining failed-attempt allocations. On success, it parses into the result allocator using `options.parse_options`. Detailed results keep their own copies of the response text.
 
 ### Retry message
 
@@ -578,14 +578,12 @@ Provider adapters decide how to append this. OpenAI-style adapters should append
 1. assistant message containing failed model text
 2. user message containing error feedback
 
-## OpenAI provider v0 shape
+## OpenAI provider
 
-The OpenAI adapter should use minimal hand-written request until generated `openai.zig` exposes usable request/response/auth APIs.
+The adapter uses generated OpenAI request types. It constructs request headers and uses the injected HTTP transport or the SDK's raw request dispatch.
 
 ```zig
 pub const OpenAI = struct {
-    pub const default_model = "gpt-5.4-mini";
-
     pub const Config = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -613,6 +611,12 @@ pub const OpenAI = struct {
     pub const Message = struct {
         role: Role,
         content: []const u8,
+        images: []const Image = &.{},
+    };
+
+    pub const Image = struct {
+        url: []const u8,
+        detail: ?[]const u8 = null,
     };
 
     pub const Role = enum {

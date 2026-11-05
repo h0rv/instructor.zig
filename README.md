@@ -13,7 +13,7 @@ Use `client.decisions` with OpenAI or TypeSafe-compatible services for boolean c
 Add the dependency:
 
 ```sh
-zig fetch --save=instructor 'git+https://github.com/h0rv/instructor.zig.git?ref=v0.3.0'
+zig fetch --save=instructor 'git+https://github.com/h0rv/instructor.zig.git?ref=v0.4.0'
 ```
 
 Pin a commit for reproducible builds. Add the module in `build.zig`:

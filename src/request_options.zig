@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
 pub const QueryParam = struct { name: []const u8, value: []const u8 };
-pub const Api = enum { responses, chat_completions, anthropic };
+pub const Api = enum { responses, chat_completions, anthropic, decisions, system_one };
 
 // All helpers allocate into a caller-owned arena. Partial results on failure
 // are reclaimed by that arena, including recursively allocated JSON values.
@@ -84,6 +84,8 @@ fn validateExtra(extra: Value, api: Api, structured: bool) !void {
         for ([_][]const u8{ "model", "input", "messages" }) |reserved| {
             if (std.mem.eql(u8, key, reserved)) return error.ReservedBodyField;
         }
+        if ((api == .decisions or api == .system_one) and std.mem.eql(u8, key, "questions")) return error.ReservedBodyField;
+        if (api == .system_one and std.mem.eql(u8, key, "state")) return error.ReservedBodyField;
         if (std.mem.eql(u8, key, "stream")) {
             if (value != .bool or value.bool) return error.UnsupportedStreaming;
         }
@@ -92,6 +94,7 @@ fn validateExtra(extra: Value, api: Api, structured: bool) !void {
             if (std.mem.eql(u8, key, reserved)) return error.ReservedBodyField;
         }
         switch (api) {
+            .decisions, .system_one => {},
             .chat_completions => {
                 if (std.mem.eql(u8, key, "response_format")) return error.ReservedBodyField;
             },
@@ -247,6 +250,24 @@ test "request options reserve only envelope and schema owned paths" {
     inline for (.{ "{\"stream\":true}", "{\"stream\":null}", "{\"stream\":\"false\"}" }) |json| {
         const extra = try std.json.parseFromSliceLeaky(Value, a, json, .{});
         try std.testing.expectError(error.UnsupportedStreaming, mergePayload(a, base, extra, .responses, false));
+    }
+}
+
+test "decisions extras protect questions and allow unknown configuration" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const base = try std.json.parseFromSliceLeaky(Value, a, "{\"model\":\"gpt-6-luna\",\"input\":\"text\",\"questions\":[]}", .{});
+    inline for (.{ false, true }) |structured| {
+        inline for (.{ "{\"questions\":[]}", "{\"questions\":null}", "{\"model\":\"other\"}", "{\"input\":\"other\"}" }) |json| {
+            const extra = try std.json.parseFromSliceLeaky(Value, a, json, .{});
+            try std.testing.expectError(error.ReservedBodyField, mergePayload(a, base, extra, .decisions, structured));
+        }
+        const extra = try std.json.parseFromSliceLeaky(Value, a, "{\"safety_identifier\":\"user\",\"prompt_cache_options\":{\"future\":true},\"unknown\":{\"questions\":42}}", .{});
+        const merged = try mergePayload(a, base, extra, .decisions, structured);
+        try std.testing.expectEqualStrings("user", merged.object.get("safety_identifier").?.string);
+        try std.testing.expect(merged.object.get("prompt_cache_options").?.object.get("future").?.bool);
+        try std.testing.expectEqual(@as(i64, 42), merged.object.get("unknown").?.object.get("questions").?.integer);
     }
 }
 

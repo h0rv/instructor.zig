@@ -4,6 +4,8 @@ const types = @import("../core/types.zig");
 const Options = @import("../core/options.zig").Options;
 const http = @import("../transport.zig");
 const request_options = @import("../request_options.zig");
+const decisions = @import("../decisions.zig");
+const system_one = @import("system_one.zig");
 pub const QueryParam = request_options.QueryParam;
 
 pub const api = openai;
@@ -15,12 +17,15 @@ pub const Client = struct {
     allocator: std.mem.Allocator,
     sdk: openai.Client,
     endpoint: Endpoint = .responses,
+    decision_format: DecisionFormat = .openai,
     http_referer: ?[]const u8 = null,
     app_name: ?[]const u8 = null,
     transport: ?http.Transport = null,
     max_response_bytes: usize = 8 * 1024 * 1024,
     last_status: ?std.http.Status = null,
     last_error_body: ?[]u8 = null,
+
+    pub const DecisionFormat = enum { openai, typesafe };
 
     pub const Endpoint = enum {
         responses,
@@ -44,6 +49,7 @@ pub const Client = struct {
         base_url: []const u8 = "https://api.openai.com/v1",
         /// `.chat_completions` works with OpenRouter and many OpenAI-compatible APIs.
         endpoint: Endpoint = .responses,
+        decision_format: DecisionFormat = .openai,
         /// Optional OpenRouter ranking header.
         http_referer: ?[]const u8 = null,
         /// Optional OpenRouter ranking header.
@@ -99,6 +105,7 @@ pub const Client = struct {
             .allocator = config.allocator,
             .sdk = sdk,
             .endpoint = config.endpoint,
+            .decision_format = config.decision_format,
             .http_referer = config.http_referer,
             .app_name = config.app_name,
             .transport = config.transport,
@@ -162,6 +169,67 @@ pub const Client = struct {
         };
         defer raw.deinit();
         return self.decodeCompletion(allocator, raw, true);
+    }
+
+    /// Decisions request. Questions and input are borrowed only during this call.
+    pub fn createDecision(self: *Client, allocator: std.mem.Allocator, request: decisions.CreateParams) !decisions.Response {
+        self.clearLastError();
+        const model = request.model orelse return error.MissingModel;
+        if (model.len == 0) return error.MissingModel;
+        if (request.questions.len == 0 or request.questions.len > 400) return error.InvalidDecisionQuestions;
+
+        var temporary = std.heap.ArenaAllocator.init(allocator);
+        defer temporary.deinit();
+        var raw = switch (self.decision_format) {
+            .openai => try dispatch(self, allocator, "/decisions", openai.DecisionRequest{
+                .model = model,
+                .input = .{ .string = request.input },
+                .questions = request.questions,
+            }, request, false),
+            .typesafe => try dispatch(self, allocator, "/systemone", try system_one.encode(temporary.allocator(), request), request, false),
+        };
+        defer raw.deinit();
+        return self.decodeDecision(allocator, raw, request.questions) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            self.last_status = raw.status;
+            self.last_error_body = try self.allocator.dupe(u8, raw.body);
+            return err;
+        };
+    }
+
+    fn decodeDecision(self: *Client, allocator: std.mem.Allocator, raw: openai.RawResponse, questions: []const openai.QuestionParam) !decisions.Response {
+        const arena = try allocator.create(std.heap.ArenaAllocator);
+        errdefer allocator.destroy(arena);
+        arena.* = .init(allocator);
+        errdefer arena.deinit();
+        const owned = arena.allocator();
+        if (raw.status.class() != .success or try hasProviderError(owned, raw.body)) return Error.ProviderHttpError;
+        const raw_response = try owned.dupe(u8, raw.body);
+        if (self.decision_format == .typesafe) {
+            const decoded = try system_one.decode(owned, raw_response, questions);
+            return .{
+                .arena = arena,
+                .value = decoded.value,
+                .status = raw.status,
+                .raw_response = raw_response,
+                .usage = decoded.usage,
+                .model = decoded.value.model,
+                .rounding = decoded.rounding,
+            };
+        }
+        const value = try std.json.parseFromSliceLeaky(openai.DecisionResponse, owned, raw_response, .{
+            .allocate = .alloc_always,
+            .ignore_unknown_fields = true,
+            .duplicate_field_behavior = .@"error",
+        });
+        return .{
+            .arena = arena,
+            .value = value,
+            .status = raw.status,
+            .raw_response = raw_response,
+            .usage = try extractUsage(owned, raw_response),
+            .model = value.model,
+        };
     }
 
     fn decodeCompletion(self: *Client, allocator: std.mem.Allocator, raw: openai.RawResponse, ordinary: bool) !types.Completion {
@@ -291,11 +359,12 @@ fn postChatCompletions(
 }
 
 /// Preserve the SDK dispatch (including observers) for existing low-level callers.
-fn dispatch(client: *Client, allocator: std.mem.Allocator, path: []const u8, body: anytype, request: Client.Request, structured: bool) !openai.RawResponse {
+fn dispatch(client: *Client, allocator: std.mem.Allocator, path: []const u8, body: anytype, request: anytype, structured: bool) !openai.RawResponse {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const merged = try request_options.mergePayload(scratch, body, request.extra_body, if (client.endpoint == .responses) .responses else .chat_completions, structured);
+    const api_kind: request_options.Api = if (std.mem.eql(u8, path, "/systemone")) .system_one else if (std.mem.eql(u8, path, "/decisions")) .decisions else if (client.endpoint == .responses) .responses else .chat_completions;
+    const merged = try request_options.mergePayload(scratch, body, request.extra_body, api_kind, structured);
     const payload = try std.json.Stringify.valueAlloc(scratch, merged, .{});
     var defaults: std.ArrayList(std.http.Header) = .empty;
     try defaults.appendSlice(scratch, client.sdk.default_headers);
@@ -1114,6 +1183,282 @@ test "build responses tool call request" {
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"name\":\"extract_person\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"tool_choice\":") != null);
     try std.testing.expect(std.mem.indexOf(u8, payload, "\"text\"") == null);
+}
+
+const decision_fixture =
+    \\{"model":"gpt-6-luna","answers":[{"type":"predicate","name":"p","probability":0.8},{"type":"choice","name":"c","choice":"yes","confidence":0.9,"probabilities":[{"value":"yes","probability":0.9},{"value":false,"probability":0.1}]},{"type":"score","name":"s","score":0.75,"confidence":0.75,"probabilities":[{"value":0,"label":"low","probability":0.25},{"value":1,"label":"high","probability":0.75}]},{"type":"refusal","name":null},{"type":"future","nested":{"kept":"owned"}}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5,"input_tokens_details":{"cached_tokens":1,"cache_write_tokens":0},"output_tokens_details":{"reasoning_tokens":0}},"future_root":true}
+;
+
+const decision_questions = [_]openai.QuestionParam{.{ .predicate = .{
+    .type = "predicate",
+    .name = "p",
+    .instructions = .{ .string = "Is it true?" },
+} }};
+const decision_request: decisions.CreateParams = .{ .model = "gpt-6-luna", .input = "source text", .questions = &decision_questions };
+
+const DecisionsProbe = struct {
+    response: []const u8 = decision_fixture,
+    status: std.http.Status = .ok,
+    extras: bool = false,
+    override_auth: bool = false,
+    question_count: usize = 1,
+    raw_question: bool = false,
+    calls: usize = 0,
+    failure: ?anyerror = null,
+
+    fn check(self: *@This(), allocator: std.mem.Allocator, url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) !void {
+        self.calls += 1;
+        try std.testing.expectEqualStrings(if (self.extras)
+            "offline://openai/v1/decisions?existing=1&a%26b=x%20y%2B%23&a%26b=two#fragment"
+        else
+            "https://example.test/v1/decisions", url);
+        try ScriptedTransport.expectHeader(headers, "Authorization", if (self.override_auth) "custom auth" else "Bearer secret");
+        try ScriptedTransport.expectHeader(headers, "Content-Type", if (self.extras) "application/custom+json" else "application/json");
+        try ScriptedTransport.expectHeader(headers, "Accept", "application/json");
+        if (self.extras) {
+            try ScriptedTransport.expectHeader(headers, "X-Extra", "new");
+            try ScriptedTransport.expectHeader(headers, "HTTP-Referer", "https://app.test");
+            try ScriptedTransport.expectHeader(headers, "X-Title", "Example");
+            try ScriptedTransport.expectHeader(headers, "OpenAI-Organization", "org");
+            try ScriptedTransport.expectHeader(headers, "OpenAI-Project", "project");
+        }
+        for ([_][]const u8{ "Authorization", "Content-Type", "Accept" }) |name| {
+            var count: usize = 0;
+            for (headers) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, name)) count += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), count);
+        }
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload.?, .{ .duplicate_field_behavior = .@"error" });
+        defer parsed.deinit();
+        const body = parsed.value.object;
+        try std.testing.expectEqualStrings("gpt-6-luna", body.get("model").?.string);
+        try std.testing.expectEqualStrings("source text", body.get("input").?.string);
+        const questions = body.get("questions").?.array.items;
+        try std.testing.expectEqual(self.question_count, questions.len);
+        if (self.raw_question) {
+            try std.testing.expectEqualStrings("future_question", questions[0].object.get("type").?.string);
+            try std.testing.expectEqualStrings("unchanged", questions[0].object.get("unknown").?.string);
+        } else {
+            try std.testing.expectEqualStrings("predicate", questions[0].object.get("type").?.string);
+            try std.testing.expectEqualStrings("Is it true?", questions[0].object.get("instructions").?.string);
+            try std.testing.expectEqualStrings("p", questions[0].object.get("name").?.string);
+        }
+        try std.testing.expect(!body.contains("safety_identifier"));
+        try std.testing.expect(!body.contains("prompt_cache_key"));
+        if (self.extras) {
+            try std.testing.expect(body.get("prompt_cache_options").?.object.get("future").?.bool);
+            try std.testing.expectEqualStrings("kept", body.get("unknown").?.object.get("questions").?.string);
+        } else try std.testing.expect(!body.contains("prompt_cache_options"));
+    }
+
+    fn send(ctx: ?*anyopaque, _: std.Io, allocator: std.mem.Allocator, request: http.Request) !http.Response {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        try std.testing.expectEqual(std.http.Method.POST, request.method);
+        try std.testing.expectEqual(@as(usize, 4096), request.max_response_bytes);
+        try self.check(allocator, request.url, request.headers, request.body);
+        return .{ .allocator = allocator, .status = self.status, .body = try allocator.dupe(u8, self.response) };
+    }
+
+    fn observe(ctx: ?*anyopaque, _: std.http.Method, url: []const u8, headers: []const std.http.Header, payload: ?[]const u8) void {
+        const self: *@This() = @ptrCast(@alignCast(ctx.?));
+        self.check(std.testing.allocator, url, headers, payload) catch |err| {
+            self.failure = err;
+        };
+    }
+};
+
+fn decisionsClient(allocator: std.mem.Allocator, probe: *DecisionsProbe) Client {
+    return Client.init(.{
+        .allocator = allocator,
+        .io = std.testing.io,
+        .api_key = "secret",
+        .endpoint = .chat_completions,
+        .base_url = "https://example.test/v1/",
+        .max_response_bytes = 4096,
+        .transport = .{ .ctx = probe, .send_fn = DecisionsProbe.send },
+    });
+}
+
+fn ownedDecision(allocator: std.mem.Allocator) !decisions.Response {
+    var source = std.heap.ArenaAllocator.init(allocator);
+    defer source.deinit();
+    var probe: DecisionsProbe = .{};
+    var client = decisionsClient(allocator, &probe);
+    defer client.deinit();
+    var request = decision_request;
+    request.input = try source.allocator().dupe(u8, request.input);
+    request.questions = try source.allocator().dupe(openai.QuestionParam, request.questions);
+    return client.createDecision(allocator, request);
+}
+
+fn decisionOwnershipExercise(allocator: std.mem.Allocator) !void {
+    var result = try ownedDecision(allocator);
+    defer result.deinit();
+    try std.testing.expectEqualStrings(decision_fixture, result.raw_response);
+    try std.testing.expectEqualStrings("gpt-6-luna", result.model);
+    try std.testing.expectEqual(@as(u64, 5), result.usage.total_tokens);
+    try std.testing.expectEqual(@as(f64, 0.8), result.value.answers[0].predicate.probability);
+    try std.testing.expectEqualStrings("yes", result.value.answers[1].choice.choice.string);
+    try std.testing.expect(!result.value.answers[1].choice.probabilities[1].value.boolean);
+    try std.testing.expectEqualStrings("high", result.value.answers[2].score.probabilities[1].label);
+    try std.testing.expectEqual(@as(f64, 0.75), result.value.answers[2].score.score);
+    try std.testing.expect(result.value.answers[3] == .refusal);
+    try std.testing.expectEqualStrings("owned", result.value.answers[4].raw.object.get("nested").?.object.get("kept").?.string);
+}
+
+test "decisions owns moved response beyond source and client cleanup and preserves SDK variants" {
+    try decisionOwnershipExercise(std.testing.allocator);
+}
+
+fn decisionExtrasExercise(allocator: std.mem.Allocator, comptime legacy: bool, override_auth: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var probe: DecisionsProbe = .{ .extras = true, .override_auth = override_auth };
+    var client = decisionsClient(allocator, &probe);
+    defer client.deinit();
+    client.sdk.base_url = "offline://openai/v1/?existing=1#fragment";
+    client.http_referer = "https://app.test";
+    client.app_name = "Example";
+    client.sdk.organization = "org";
+    client.sdk.project = "project";
+    const defaults = [_]std.http.Header{ .{ .name = "X-Extra", .value = "old" }, .{ .name = "Content-Type", .value = "old" } };
+    client.sdk.default_headers = &defaults;
+    if (legacy) {
+        client.transport = null;
+        client.sdk.http_observer = .{ .ctx = &probe, .onRequest = DecisionsProbe.observe, .onResponse = null, .onError = null };
+    }
+    var request = decision_request;
+    request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "{\"prompt_cache_options\":{\"future\":true},\"unknown\":{\"questions\":\"kept\"}}", .{});
+    const headers = [_]std.http.Header{
+        .{ .name = "cOnTeNt-TyPe", .value = "application/custom+json" },
+        .{ .name = "x-EXTRA", .value = "new" },
+        .{ .name = "aUtHoRiZaTiOn", .value = "custom auth" },
+    };
+    request.extra_headers = headers[0..if (override_auth) 3 else 2];
+    request.extra_query = &.{ .{ .name = "a&b", .value = "x y+#" }, .{ .name = "a&b", .value = "two" } };
+    if (legacy) {
+        if (client.createDecision(allocator, request)) |value| {
+            var result = value;
+            result.deinit();
+            return error.ExpectedOfflineError;
+        } else |err| switch (err) {
+            error.UnsupportedUriScheme => {},
+            else => return err,
+        }
+        if (probe.failure) |err| return err;
+    } else {
+        var result = try client.createDecision(allocator, request);
+        defer result.deinit();
+    }
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(@intFromPtr(&defaults), @intFromPtr(client.sdk.default_headers.ptr));
+}
+
+test "decisions extras use injected and legacy observer dispatch independently of chat endpoint" {
+    inline for (.{ false, true }) |legacy| {
+        try decisionExtrasExercise(std.testing.allocator, legacy, false);
+        try decisionExtrasExercise(std.testing.allocator, legacy, true);
+    }
+}
+
+test "decisions rejects missing models question counts and reserved extras before dispatch" {
+    var probe: DecisionsProbe = .{};
+    var client = decisionsClient(std.testing.allocator, &probe);
+    defer client.deinit();
+    var request = decision_request;
+    request.model = null;
+    try std.testing.expectError(error.MissingModel, client.createDecision(std.testing.allocator, request));
+    request.model = "";
+    try std.testing.expectError(error.MissingModel, client.createDecision(std.testing.allocator, request));
+    request = decision_request;
+    request.questions = &.{};
+    try std.testing.expectError(error.InvalidDecisionQuestions, client.createDecision(std.testing.allocator, request));
+    const too_many: [401]openai.QuestionParam = @splat(decision_questions[0]);
+    request.questions = &too_many;
+    try std.testing.expectError(error.InvalidDecisionQuestions, client.createDecision(std.testing.allocator, request));
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    inline for (.{ "{\"questions\":null}", "{\"questions\":[]}", "{\"input\":\"other\"}", "{\"model\":\"other\"}" }) |json| {
+        request = decision_request;
+        request.extra_body = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), json, .{});
+        try std.testing.expectError(error.ReservedBodyField, client.createDecision(std.testing.allocator, request));
+    }
+    try std.testing.expectEqual(@as(usize, 0), probe.calls);
+}
+
+test "decisions accepts 400 questions and sends raw questions without rewriting or retries" {
+    var probe: DecisionsProbe = .{ .question_count = 400 };
+    var client = decisionsClient(std.testing.allocator, &probe);
+    defer client.deinit();
+    var request = decision_request;
+    const maximum: [400]openai.QuestionParam = @splat(decision_questions[0]);
+    request.questions = &maximum;
+    var result = try client.createDecision(std.testing.allocator, request);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const raw_question = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), "{\"type\":\"future_question\",\"unknown\":\"unchanged\"}", .{});
+    request.questions = &.{.{ .raw = raw_question }};
+    probe = .{ .raw_question = true, .response = "{\"error\":{\"message\":\"unsupported question\"}}", .status = .bad_request };
+    try std.testing.expectError(error.ProviderHttpError, client.createDecision(std.testing.allocator, request));
+    try std.testing.expectEqual(@as(usize, 1), probe.calls);
+    try std.testing.expectEqual(std.http.Status.bad_request, client.lastStatus().?);
+    try std.testing.expectEqualStrings(probe.response, client.lastErrorBody().?);
+}
+
+fn decisionErrorExercise(allocator: std.mem.Allocator, body: []const u8, status: std.http.Status, expected: anyerror) !void {
+    var probe: DecisionsProbe = .{ .response = body, .status = status };
+    var client = decisionsClient(allocator, &probe);
+    defer client.deinit();
+    if (client.createDecision(allocator, decision_request)) |value| {
+        var result = value;
+        result.deinit();
+        return error.ExpectedDecisionFailure;
+    } else |err| {
+        if (err == error.OutOfMemory) return err;
+        try std.testing.expectEqual(expected, err);
+    }
+    try std.testing.expectEqual(status, client.lastStatus().?);
+    try std.testing.expectEqualStrings(body, client.lastErrorBody().?);
+    probe.response = decision_fixture;
+    probe.status = .ok;
+    var result = try client.createDecision(allocator, decision_request);
+    defer result.deinit();
+    try std.testing.expect(client.lastStatus() == null);
+    try std.testing.expect(client.lastErrorBody() == null);
+}
+
+test "decisions HTTP malformed and duplicate field diagnostics propagate all allocation failures" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), decisionOwnershipExercise, .{});
+    inline for (.{ false, true }) |legacy| {
+        const Exercise = struct {
+            fn run(allocator: std.mem.Allocator) !void {
+                try decisionExtrasExercise(allocator, legacy, true);
+            }
+        };
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), Exercise.run, .{});
+    }
+    const Case = struct { body: []const u8, status: std.http.Status = .ok, err: anyerror };
+    const cases = [_]Case{
+        .{ .body = "bad question", .status = .bad_request, .err = error.ProviderHttpError },
+        .{ .body = "{\"error\":{\"message\":\"denied\"}}", .err = error.ProviderHttpError },
+        .{ .body = "not json", .err = error.SyntaxError },
+        .{ .body = "{\"model\":\"first\",\"model\":\"duplicate\"}", .err = error.DuplicateField },
+        .{ .body = "{\"answers\":[{\"type\":\"future\",\"nested\":{\"x\":1,\"x\":2}}]}", .err = error.DuplicateField },
+        .{ .body = "{}", .err = error.MissingField },
+    };
+    for (cases) |case| {
+        try std.testing.checkAllAllocationFailures(no_resize.allocator(), decisionErrorExercise, .{ case.body, case.status, case.err });
+    }
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var probe: DecisionsProbe = .{ .response = "denied", .status = .unauthorized };
+    var client = decisionsClient(failing.allocator(), &probe);
+    defer client.deinit();
+    try std.testing.expectError(error.OutOfMemory, client.createDecision(std.testing.allocator, decision_request));
 }
 
 const ExtrasProbe = struct {

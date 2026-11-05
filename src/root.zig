@@ -3,6 +3,7 @@ const providers = @import("providers/mod.zig");
 const client = @import("client.zig");
 
 pub const http = @import("transport.zig");
+pub const decisions = @import("decisions.zig");
 pub const Client = client.Client;
 pub const ClientConfig = client.Config;
 pub const EnvConfig = client.EnvConfig;
@@ -12,6 +13,7 @@ pub const MessageCreateParams = client.MessageCreateParams;
 pub const ResponseCreateParams = client.ResponseCreateParams;
 pub const Messages = client.Messages;
 pub const Responses = client.Responses;
+pub const Decisions = client.Decisions;
 pub const Message = client.Message;
 pub const QueryParam = client.QueryParam;
 pub const Role = client.Role;
@@ -56,4 +58,5 @@ test {
     _ = providers;
     _ = client;
     _ = http;
+    _ = decisions;
 }

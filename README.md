@@ -6,12 +6,14 @@ Define a struct and call `parse`. Instructor generates its JSON Schema and valid
 
 Use the same `client.responses.parse` or `client.messages.parse` calls with OpenAI Responses, OpenAI-compatible Chat Completions, or Anthropic Messages. Choose the provider and endpoint in client configuration.
 
+Use `client.decisions` with OpenAI or TypeSafe-compatible services for boolean conditions and typed routing.
+
 ## Install
 
 Add the dependency:
 
 ```sh
-zig fetch --save=instructor 'git+https://github.com/h0rv/instructor.zig.git?ref=v0.3.0'
+zig fetch --save=instructor 'git+https://github.com/h0rv/instructor.zig.git?ref=v0.4.0'
 ```
 
 Pin a commit for reproducible builds. Add the module in `build.zig`:
@@ -69,6 +71,32 @@ The result owns its memory. It remains valid after client cleanup if the backing
 
 Run [this example](examples/client.zig) with `zig build run-client`. It makes a live request and may retry. To try the same extraction without credentials or network access, run `zig build run-custom-transport`.
 
+## Decisions API
+
+Ask a fixed question about text and use the answer in an ordinary Zig branch:
+
+```zig
+var client = try instructor.Client.fromEnv(init, .{
+    .provider = .openai,
+    .model = "gpt-6-luna",
+});
+defer client.deinit();
+
+if (try client.decisions.condition(.{
+    .input = passage,
+    .instructions = "Does this passage answer the search query?",
+    .threshold = 0.8,
+})) {
+    includePassage();
+} else {
+    omitPassage();
+}
+```
+
+For several answers, define `Questions(T)` once and call `questions.parse(...)`. It returns the value and handles response cleanup. Use `parseDetailed(...)` when you need probabilities.
+
+For Jev through TypeSafe, OpenRouter, or Vercel, use the shared `.typesafe` adapter. The `condition` and `Questions(T)` calls stay the same. See [provider configuration](docs/decisions.md#provider-configuration) and the [ticket routing example](examples/decisions.zig).
+
 ## What you can build
 
 | Feature | Example or guide |
@@ -78,6 +106,7 @@ Run [this example](examples/client.zig) with `zig build run-client`. It makes a 
 | Extract nested objects and arrays. | [Invoice with line items](examples/invoice_extraction.zig). |
 | Process reviews one at a time and free each result. | [Batch extraction](examples/batch_extract.zig) with `Session.reset()`. |
 | Classify text into typed cases. | [Tagged union classification](examples/classify_union.zig) and [support routing](examples/support_router.zig). |
+| Use model decisions in `if` and `switch`. | [Decisions guide](docs/decisions.md) and [ticket routing](examples/decisions.zig). |
 | Request answers with supporting quotes. | [Exact citations](examples/exact_citations.zig). Check quotes against the source before trusting them. |
 | Extract tasks or propose redactions. | [Meeting actions](examples/action_items.zig) and [PII redaction](examples/pii_redaction.zig). Review redactions before logging sensitive text. |
 | Observe requests and retries. | [Hooks and usage](docs/api.md#hooks). |

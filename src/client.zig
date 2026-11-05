@@ -7,9 +7,10 @@ const openai = @import("providers/openai.zig");
 const anthropic = @import("providers/anthropic.zig");
 const http = @import("transport.zig");
 const request_options = @import("request_options.zig");
+const decisions_mod = @import("decisions.zig");
 pub const QueryParam = request_options.QueryParam;
 
-pub const Provider = enum { openai, anthropic };
+pub const Provider = enum { openai, anthropic, typesafe };
 pub const Role = enum { system, user, assistant };
 pub const Message = struct {
     role: Role,
@@ -43,9 +44,16 @@ pub const AnthropicConfig = struct {
     max_tokens: u32 = 4096,
 };
 
+/// TypeSafe System One, including compatible OpenRouter and Vercel endpoints.
+pub const TypeSafeConfig = struct {
+    api_key: []const u8,
+    base_url: []const u8 = "https://api.typesafe.ai/v1",
+};
+
 pub const Backend = union(Provider) {
     openai: OpenAIConfig,
     anthropic: AnthropicConfig,
+    typesafe: TypeSafeConfig,
 };
 
 pub const Config = struct {
@@ -122,6 +130,7 @@ pub fn Owned(comptime T: type) type {
 const NativeBackend = union(Provider) {
     openai: openai.Client,
     anthropic: anthropic.Client,
+    typesafe: openai.Client,
 };
 
 /// Buffered text completion and typed extraction through one request API.
@@ -131,6 +140,7 @@ pub const Client = struct {
     _state: *State,
     messages: Messages,
     responses: Responses,
+    decisions: Decisions,
 
     pub fn init(config: Config) !Client {
         return wrap(try State.init(config));
@@ -149,6 +159,7 @@ pub const Client = struct {
             ._state = pointer,
             .messages = .{ .state = pointer },
             .responses = .{ .state = pointer },
+            .decisions = .{ .state = pointer },
         };
     }
 
@@ -191,6 +202,7 @@ const State = struct {
         const default_model = switch (config.provider) {
             .openai => openai.Client.default_model,
             .anthropic => anthropic.Client.default_model,
+            .typesafe => "jev-latest",
         };
         const model = config.model orelse default_model;
         if (model.len == 0) return error.MissingModel;
@@ -225,6 +237,15 @@ const State = struct {
                 .transport = transport,
                 .max_response_bytes = config.max_response_bytes,
             }) },
+            .typesafe => |provider| .{ .typesafe = openai.Client.init(.{
+                .allocator = config.allocator,
+                .io = config.io,
+                .api_key = try strings.dupe(u8, provider.api_key),
+                .base_url = try strings.dupe(u8, provider.base_url),
+                .decision_format = .typesafe,
+                .transport = transport,
+                .max_response_bytes = config.max_response_bytes,
+            }) },
         };
         switch (backend) {
             inline else => |*provider| provider.sdk.default_headers = headers,
@@ -247,12 +268,13 @@ const State = struct {
     /// Reads only the supplied process environment, not hidden global state.
     /// Servers can use init with credentials supplied by their own application.
     pub fn fromEnv(init_context: std.process.Init, config: EnvConfig) !State {
-        if (config.provider == .anthropic and config.endpoint != .responses) {
+        if (config.provider != .openai and config.endpoint != .responses) {
             return error.UnsupportedControl;
         }
         const key_name = switch (config.provider) {
             .openai => "OPENAI_API_KEY",
             .anthropic => "ANTHROPIC_API_KEY",
+            .typesafe => "TYPESAFE_API_KEY",
         };
         const key = init_context.environ_map.get(key_name) orelse return error.MissingApiKey;
         if (key.len == 0) return error.MissingApiKey;
@@ -268,6 +290,10 @@ const State = struct {
                 .anthropic => .{ .anthropic = .{
                     .api_key = key,
                     .base_url = config.base_url orelse "https://api.anthropic.com",
+                } },
+                .typesafe => .{ .typesafe = .{
+                    .api_key = key,
+                    .base_url = config.base_url orelse "https://api.typesafe.ai/v1",
                 } },
             },
             .model = config.model,
@@ -290,13 +316,16 @@ const State = struct {
     }
 
     pub fn diagnostic(self: *const State) types.Diagnostic {
-        return switch (self.backend) {
+        var result = switch (self.backend) {
             inline else => |*provider| provider.diagnostic(),
         };
+        result.provider = @tagName(self.backend);
+        return result;
     }
 
     fn createRequest(self: *State, input: Request) !Response {
         self.clearLastError();
+        if (self.backend == .typesafe) return error.UnsupportedTextProvider;
         const arena = try createArena(self.allocator);
         errdefer destroyArena(arena);
         const allocator = arena.allocator();
@@ -308,6 +337,7 @@ const State = struct {
         const completion = switch (self.backend) {
             .openai => |*provider| try provider.completeText(allocator, try openaiRequest(allocator, request, model, conversation)),
             .anthropic => |*provider| try provider.completeText(allocator, try anthropicRequest(allocator, request, model, conversation)),
+            .typesafe => unreachable,
         };
         if (self.hooks) |hooks| {
             hooks.emit(.response_received, .{ .response_text = completion.text, .raw_response = completion.raw_response, .usage = completion.usage });
@@ -349,6 +379,7 @@ const State = struct {
 
     fn parseDetailedInto(self: *State, comptime T: type, result_allocator: std.mem.Allocator, input: Request, comptime options: ParseOptions) !types.CreateResult(T) {
         self.clearLastError();
+        if (self.backend == .typesafe) return error.UnsupportedTextProvider;
         var temporary = std.heap.ArenaAllocator.init(self.allocator);
         defer temporary.deinit();
         const allocator = temporary.allocator();
@@ -358,6 +389,87 @@ const State = struct {
         return switch (self.backend) {
             .openai => |*provider| core.createDetailedWithArena(T, allocator, result_allocator, provider, try openaiRequest(allocator, request, model, conversation), null, self.hooks, extractionOptions(.openai, options)),
             .anthropic => |*provider| core.createDetailedWithArena(T, allocator, result_allocator, provider, try anthropicRequest(allocator, request, model, conversation), null, self.hooks, extractionOptions(.anthropic, options)),
+            .typesafe => unreachable,
+        };
+    }
+
+    fn requestDecision(self: *State, input: decisions_mod.CreateParams) !decisions_mod.Response {
+        self.clearLastError();
+        if (self.backend == .anthropic) return error.UnsupportedDecisionProvider;
+        var temporary = std.heap.ArenaAllocator.init(self.allocator);
+        defer temporary.deinit();
+        const allocator = temporary.allocator();
+        var params = input;
+        params.model = input.model orelse self.model;
+        params.extra_body = try request_options.mergeExtraBody(allocator, self.extra_body, input.extra_body);
+        params.extra_query = try request_options.mergeQuery(allocator, self.extra_query, input.extra_query);
+        if (self.hooks) |hooks| hooks.emit(.request_start, .{});
+        const response = switch (self.backend) {
+            .openai, .typesafe => |*provider| try provider.createDecision(self.allocator, params),
+            .anthropic => unreachable,
+        };
+        if (self.hooks) |hooks| hooks.emit(.response_received, .{
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+        });
+        return response;
+    }
+
+    fn createDecision(self: *State, params: decisions_mod.CreateParams) !decisions_mod.Response {
+        const response = try self.requestDecision(params);
+        if (self.hooks) |hooks| hooks.emit(.completion_done, .{
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+        });
+        return response;
+    }
+
+    fn parseDecision(self: *State, comptime T: type, params: decisions_mod.ParseParams(T)) !decisions_mod.Parsed(T) {
+        self.clearLastError();
+        if (self.backend == .anthropic) return error.UnsupportedDecisionProvider;
+        var temporary = std.heap.ArenaAllocator.init(self.allocator);
+        defer temporary.deinit();
+        const questions = try decisions_mod.buildQuestions(T, temporary.allocator(), params.questions);
+        var response = try self.requestDecision(.{
+            .input = params.input,
+            .questions = questions,
+            .model = params.model,
+            .extra_body = params.extra_body,
+            .extra_headers = params.extra_headers,
+            .extra_query = params.extra_query,
+        });
+        errdefer response.deinit();
+        const parsed = decisions_mod.decodeRounded(T, response.value, params.questions, response.rounding) catch |err| {
+            switch (self.backend) {
+                .openai, .typesafe => |*provider| {
+                    provider.last_status = response.status;
+                    provider.last_error_body = try self.allocator.dupe(u8, response.raw_response);
+                },
+                .anthropic => unreachable,
+            }
+            if (self.hooks) |hooks| hooks.emit(.parse_error, .{
+                .schema_name = @typeName(T),
+                .raw_response = response.raw_response,
+                .error_name = @errorName(err),
+                .usage = response.usage,
+            });
+            return err;
+        };
+        if (self.hooks) |hooks| hooks.emit(.completion_done, .{
+            .schema_name = @typeName(T),
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+        });
+        return .{
+            .arena = response.arena,
+            .value = parsed.value,
+            .details = parsed.details,
+            .response = response.value,
+            .rounding = response.rounding,
+            .status = response.status,
+            .raw_response = response.raw_response,
+            .usage = response.usage,
+            .model = response.model,
         };
     }
 
@@ -386,6 +498,35 @@ const State = struct {
         @memcpy(conversation[0..request.messages.len], request.messages);
         if (request.prompt) |prompt| conversation[request.messages.len] = .{ .role = .user, .content = prompt };
         return conversation;
+    }
+};
+
+/// A borrowed resource for Decisions requests and typed branching.
+/// Its state remains valid across moves of the owning client.
+pub const Decisions = struct {
+    state: *State,
+
+    /// Ask one yes/no question and discard response metadata.
+    /// Use parse(bool, ...) to inspect the probability.
+    pub fn condition(self: Decisions, params: decisions_mod.ConditionParams) !bool {
+        var result = try self.parse(bool, .{
+            .input = params.input,
+            .questions = .{ .instructions = params.instructions, .threshold = params.threshold },
+            .model = params.model,
+            .extra_body = params.extra_body,
+            .extra_headers = params.extra_headers,
+            .extra_query = params.extra_query,
+        });
+        defer result.deinit();
+        return result.value;
+    }
+
+    pub fn create(self: Decisions, params: decisions_mod.CreateParams) !decisions_mod.Response {
+        return self.state.createDecision(params);
+    }
+
+    pub fn parse(self: Decisions, comptime T: type, params: decisions_mod.ParseParams(T)) !decisions_mod.Parsed(T) {
+        return self.state.parseDecision(T, params);
     }
 };
 
@@ -478,6 +619,7 @@ fn extractionOptions(comptime provider: Provider, comptime options: ParseOptions
         .schema_options = options.schema_options orelse switch (provider) {
             .openai => options_mod.openai_schema_options,
             .anthropic => anthropic.anthropic_schema_options,
+            .typesafe => unreachable,
         },
         .parse_options = options.parse_options,
     };
@@ -525,4 +667,6 @@ fn optionalDupe(allocator: std.mem.Allocator, value: ?[]const u8) !?[]const u8 {
 
 test {
     _ = @import("client_tests.zig");
+    _ = @import("client_decision_tests.zig");
+    _ = @import("client_system_one_tests.zig");
 }

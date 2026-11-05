@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+Added Decisions support for OpenAI and TypeSafe-compatible services. Use `client.decisions.condition` for a boolean branch, or define reusable `Questions(T)` and call `parse` to get a value with automatic response cleanup. Use `parseDetailed` for probabilities and a common OpenAI-shaped response. The exact original provider response is in `raw_response`. The shared `.typesafe` adapter supports Jev through TypeSafe, OpenRouter, or Vercel. Added ticket routing and relevance examples.
+
 ## 0.3.0
 
 Added a common `Client` with resource fields `client.responses.create` and `client.responses.parse` for text input. Use `client.messages.create` and `client.messages.parse` for text conversations. Both resources use the configured provider and endpoint through the same adapters. They do not change the HTTP endpoint or provide full native SDK coverage.

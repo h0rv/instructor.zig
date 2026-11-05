@@ -75,6 +75,9 @@ pub fn build(b: *std.Build) void {
     const client_example = addExample(b, mod, target, optimize, "client-example", "examples/client.zig", "run-client", "Run unified client with Anthropic credentials");
     const custom_transport_example = addExample(b, mod, target, optimize, "custom-transport-example", "examples/custom_transport.zig", "run-custom-transport", "Run unified client with an offline custom transport");
 
+    const decisions_example = addExample(b, mod, target, optimize, "decisions-example", "examples/decisions.zig", "run-decisions", "Route a ticket with OpenAI Decisions");
+    const smart_if_example = addExample(b, mod, target, optimize, "smart-if-example", "examples/smart_if.zig", "run-smart-if", "Branch on a typed decision with explicit uncertainty");
+
     const anthropic_example = addExample(b, mod, target, optimize, "anthropic-example", "examples/anthropic.zig", "run-anthropic", "Run Anthropic example");
     const build_anthropic = b.step("anthropic-example", "Build Anthropic example without credentials");
     build_anthropic.dependOn(anthropic_example);
@@ -83,6 +86,8 @@ pub fn build(b: *std.Build) void {
     examples_step.dependOn(anthropic_example);
     examples_step.dependOn(client_example);
     examples_step.dependOn(custom_transport_example);
+    examples_step.dependOn(decisions_example);
+    examples_step.dependOn(smart_if_example);
     examples_step.dependOn(openrouter_example);
     examples_step.dependOn(tool_planner_example);
     examples_step.dependOn(exact_citations_example);
